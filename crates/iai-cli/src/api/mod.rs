@@ -1,17 +1,22 @@
 //! 本地 HTTP API（axum）。
 //!
-//! 阶段 0：`/api/health`、`/api/version`，并以 `static_handler` 回退服务内嵌前端。
-//! 后续阶段在此挂载 `/api/node`、`/api/wallet`、`/api/ledger`、`/api/market/*`、
-//! `/api/team`、`/api/tasks/*` 等端点（见 `DEVELOPMENT-PLAN.md` 各阶段「API」小节）。
+//! 阶段 0：`/api/health`、`/api/version` + 内嵌前端回退。
+//! 阶段 1：`/api/node`（本机节点状态）、`/api/node/models`（GET 列出 / POST 新增）。
+//! 后续阶段在此挂载 `/api/wallet`、`/api/ledger`、`/api/market/*`、`/api/team`、`/api/tasks/*`。
 
-use axum::{routing::get, Json, Router};
+use axum::{
+    http::StatusCode,
+    routing::get,
+    Json, Router,
+};
+use iai_node::Provider;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{embed::static_handler, storage};
 
 /// 启动本地服务，仅绑定回环地址。
 pub async fn serve(port: u16) -> anyhow::Result<()> {
-    // 阶段 0：初始化存储（即便端点暂未用到，也确保数据目录/库就绪）。
     let _conn = storage::init_db()?;
 
     let app = router();
@@ -32,18 +37,89 @@ pub fn router() -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/version", get(version))
+        .route("/api/node", get(node))
+        .route("/api/node/models", get(list_models).post(add_model))
         .fallback(static_handler)
 }
 
-/// 健康检查。
+/// 统一错误映射：领域/存储错误 → 500 + JSON。
+type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
+
+fn err500(e: anyhow::Error) -> (StatusCode, Json<Value>) {
+    tracing::error!(error = %e, "API 处理失败");
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+}
+
+/* ---------- 阶段 0 ---------- */
+
 async fn health() -> Json<Value> {
     Json(json!({ "status": "ok", "node": "iai-chain" }))
 }
 
-/// 版本信息（前端安装区/落地页据此展示真实版本）。
 async fn version() -> Json<Value> {
-    Json(json!({
-        "name": "iai-chain",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))
+    Json(json!({ "name": "iai-chain", "version": env!("CARGO_PKG_VERSION") }))
+}
+
+/* ---------- 阶段 1：节点身份与模型 ---------- */
+
+/// GET /api/node —— 本机节点状态。
+async fn node() -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    storage::ensure_node(&conn).map_err(err500)?;
+    let n = storage::get_node(&conn).map_err(err500)?.expect("节点已确保存在");
+    let models = storage::list_models(&conn).map_err(err500)?;
+    let labels: Vec<String> = models.iter().map(|m| m.label.clone()).collect();
+    let caps = storage::capabilities(&conn).map_err(err500)?;
+
+    Ok(Json(json!({
+        "id": n.node_id,
+        "role": n.role.display_zh(),
+        "online": n.status.is_online(),
+        // 负载实时监控属阶段 5（任务编排），此处为占位 0。
+        "load": 0,
+        "models": labels,
+        "capabilities": caps,
+        "modelConfigured": !labels.is_empty(),
+    })))
+}
+
+/// GET /api/node/models —— 已配置模型列表（不含 key）。
+async fn list_models() -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let models = storage::list_models(&conn).map_err(err500)?;
+    let items: Vec<Value> = models
+        .iter()
+        .map(|m| json!({ "provider": m.provider, "model": m.model, "label": m.label }))
+        .collect();
+    Ok(Json(json!({ "models": items })))
+}
+
+#[derive(Deserialize)]
+struct AddModelReq {
+    provider: String,
+    model: Option<String>,
+    key: Option<String>,
+}
+
+/// POST /api/node/models —— 新增模型配置。
+async fn add_model(Json(req): Json<AddModelReq>) -> ApiResult {
+    let provider = Provider::parse(&req.provider);
+    let model = req
+        .model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| provider.default_model().to_string());
+
+    if provider.requires_key() && req.key.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("{} 需要 --key", provider.display()) })),
+        ));
+    }
+
+    let conn = storage::open_conn().map_err(err500)?;
+    let saved = storage::add_model(&conn, &provider, &model, req.key.as_deref()).map_err(err500)?;
+    Ok(Json(json!({
+        "ok": true,
+        "model": { "provider": saved.provider, "model": saved.model, "label": saved.label }
+    })))
 }

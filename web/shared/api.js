@@ -38,23 +38,50 @@ export async function getHealth() {
   }
 }
 
-/* ───────────── 阶段 2 将翻转：钱包 / 账本 ───────────── */
+/* ───────────── 阶段 1：已对接真实后端（节点 / 模型） ───────────── */
 
-/** 本机节点状态（阶段 1 翻转为 GET /api/node）。 */
+/** 本机节点状态。返回 { id, role, online, load, models[], capabilities[], modelConfigured }。 */
 export async function getNode() {
-  return {
-    id: "captain.7f3a",
-    role: "队长",
-    online: true,
-    load: 42,
-    models: ["GPT-4o", "Claude", "本地 Ollama"],
-  };
+  try {
+    return await getJSON("/api/node");
+  } catch {
+    // 离线/静态预览兜底（保持设计稿观感）
+    return { id: "captain.7f3a", role: "队长", online: false, load: 0, models: [], capabilities: [], modelConfigured: false };
+  }
 }
+
+/** 已配置模型列表（不含 key）。 */
+export async function getModels() {
+  try {
+    const r = await getJSON("/api/node/models");
+    return r.models || [];
+  } catch {
+    return [];
+  }
+}
+
+/** 新增模型配置：POST /api/node/models { provider, model?, key? }。 */
+export async function addModel(body) {
+  const res = await fetch(BASE + "/api/node/models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/* ───────────── 阶段 4 将翻转：网络 ───────────── */
 
 /** 网络概况（阶段 4 翻转为 GET /api/network）。 */
 export async function getNetwork() {
   return { membersOnline: 5, discovered: 23, publicTeams: 3 };
 }
+
+/* ───────────── 阶段 2 将翻转：钱包 / 账本 ───────────── */
 
 /** 钱包（阶段 2 翻转为 GET /api/wallet）。 */
 export async function getWallet() {

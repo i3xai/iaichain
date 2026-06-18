@@ -1,5 +1,5 @@
 // 节点控制台逻辑（ES module）。数据一律经 ../shared/api.js 接缝层取得。
-import { getMarketBook, getPriceSeries, buyAtLowest, getTasks, getTeam, getLedger, getVersion } from "/shared/api.js";
+import { getMarketBook, getPriceSeries, buyAtLowest, getTasks, getTeam, getLedger, getVersion, getNode } from "/shared/api.js";
 
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -122,6 +122,29 @@ function drawMarket() { lineChart("#mk-chart", 150, true); }
 // ---- footer version（已对接真实后端 /api/version） ----
 (async function () {
   try { var v = await getVersion(); var f = document.getElementById("footVer"); if (f) f.textContent = "v" + v.version; } catch (e) { /* 离线兜底保留默认 */ }
+})();
+
+// ---- 本机节点（已对接真实后端 /api/node） ----
+function setPill(id, online, text) {
+  var el = document.getElementById(id); if (!el) return;
+  el.className = online ? "pill online" : "pill";
+  el.innerHTML = '<span class="dot"></span>' + text;
+}
+(async function renderNode() {
+  try {
+    var n = await getNode();
+    var role = n.role || "队长";
+    var models = n.models || [];
+    var setTxt = function (id, t) { var el = document.getElementById(id); if (el) el.textContent = t; };
+    setTxt("barRole", role);
+    setTxt("barNodeId", n.id);
+    setTxt("footNode", n.id);
+    setTxt("nodeLoad", n.load);
+    var meter = document.getElementById("nodeMeter"); if (meter) meter.style.width = (n.load || 0) + "%";
+    setTxt("nodeModels", (models.length ? "模型 " + models.join(" · ") : "未配置模型（iai model add …）") + "｜角色：" + role);
+    setPill("barPill", n.online, n.online ? (n.modelConfigured ? "在线 · 模型已配置" : "在线 · 未配置模型") : "离线");
+    setPill("nodePill", n.online, n.online ? "在线" : "离线");
+  } catch (e) { /* 离线兜底：保留页面默认占位 */ }
 })();
 
 // ---- init ----
