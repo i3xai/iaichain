@@ -1,0 +1,140 @@
+/* IAI Chain · 前端唯一「接缝层」(api.js)
+ *
+ * 设计要点（见 DEVELOPMENT-PLAN.md §2）：
+ *   - 前端任何取数都只经过本文件，页面逻辑不直接碰 fetch 或硬编码数组。
+ *   - 阶段 0：除 getVersion()/getHealth() 已对接真实后端外，其余函数先返回设计稿里的
+ *     假数据（Promise 形式，模拟将来的网络调用）。
+ *   - 后续每个阶段，只需把对应函数从「返回假数据」翻转为「fetch 真实端点」，
+ *     页面行为不变、数据变真。每个函数上方标注了它将在哪个阶段被翻转。
+ *
+ * 约定：所有函数返回 Promise；调用方一律 await。
+ */
+
+const BASE = "";
+
+async function getJSON(path) {
+  const res = await fetch(BASE + path, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
+  return res.json();
+}
+
+/* ───────────── 阶段 0：已对接真实后端 ───────────── */
+
+/** 节点版本（落地页安装区 / 控制台页脚据此展示真实版本）。 */
+export async function getVersion() {
+  try {
+    return await getJSON("/api/version"); // { name, version }
+  } catch {
+    return { name: "iai-chain", version: "0.4.2" }; // 离线/静态预览兜底
+  }
+}
+
+/** 健康检查。 */
+export async function getHealth() {
+  try {
+    return await getJSON("/api/health");
+  } catch {
+    return { status: "offline" };
+  }
+}
+
+/* ───────────── 阶段 2 将翻转：钱包 / 账本 ───────────── */
+
+/** 本机节点状态（阶段 1 翻转为 GET /api/node）。 */
+export async function getNode() {
+  return {
+    id: "captain.7f3a",
+    role: "队长",
+    online: true,
+    load: 42,
+    models: ["GPT-4o", "Claude", "本地 Ollama"],
+  };
+}
+
+/** 网络概况（阶段 4 翻转为 GET /api/network）。 */
+export async function getNetwork() {
+  return { membersOnline: 5, discovered: 23, publicTeams: 3 };
+}
+
+/** 钱包（阶段 2 翻转为 GET /api/wallet）。 */
+export async function getWallet() {
+  return { balance: 1240, locked: 80, weekly: 320, lockedTasks: 2, weeklyAccepted: 3 };
+}
+
+/** 账本流水（阶段 2 翻转为 GET /api/ledger）。 */
+export async function getLedger() {
+  return [
+    { time: "09:42", type: "结算", note: "JWT 模块提交被采纳", delta: "+180" },
+    { time: "08:15", type: "锁定", note: "限流任务发起", delta: "-80" },
+    { time: "昨日", type: "结算", note: "安装脚本被采纳", delta: "+140" },
+    { time: "前日", type: "买入", note: "市场购入贡献币", delta: "+120" },
+  ];
+}
+
+/* ───────────── 阶段 3 将翻转：市场 ───────────── */
+
+/** 挂卖簿（阶段 3 翻转为 GET /api/market/book）。 */
+export async function getMarketBook() {
+  return [
+    { px: 0.86, qty: 80, node: "node.4a91" },
+    { px: 0.88, qty: 150, node: "node.7c20" },
+    { px: 0.91, qty: 60, node: "node.b3df" },
+    { px: 0.95, qty: 220, node: "node.19ae" },
+    { px: 1.02, qty: 130, node: "node.cc70" },
+  ];
+}
+
+/** 价格走势序列（阶段 3 翻转为 GET /api/market/price?range=24h）。
+ *  阶段 0 在前端生成一段以 endPx 收尾的随机游走，行为同原设计稿。 */
+export async function getPriceSeries(endPx) {
+  const N = 64;
+  const data = [];
+  let p = 0.78;
+  for (let i = 0; i < N; i++) {
+    p += (Math.random() - 0.48) * 0.018;
+    p = Math.max(0.62, Math.min(1.05, p));
+    data.push({ i, px: p });
+  }
+  data[N - 1].px = endPx;
+  return data;
+}
+
+/** 按最低价买入（阶段 3 翻转为 POST /api/market/buy，由服务端撮合 + 记账）。
+ *  阶段 0 在前端按「从最低价逐笔向上吃单」就地撮合，返回成交结果与新簿。 */
+export async function buyAtLowest(orders, need) {
+  const sorted = orders.slice().sort((a, b) => a.px - b.px);
+  let cost = 0;
+  let filled = 0;
+  let n = need;
+  for (let i = 0; i < sorted.length && n > 0; i++) {
+    const take = Math.min(n, sorted[i].qty);
+    cost += take * sorted[i].px;
+    filled += take;
+    n -= take;
+    sorted[i].qty -= take;
+  }
+  return { orders: sorted.filter((o) => o.qty > 0), filled, cost };
+}
+
+/* ───────────── 阶段 5 将翻转：任务 / 团队 ───────────── */
+
+/** 任务列表（阶段 5 翻转为 GET /api/tasks + SSE 实时进度）。 */
+export async function getTasks() {
+  return [
+    { t: "实现 Rust JWT 鉴权模块", repo: "github.com/acme/auth-lib", st: "run", pct: 75, roles: [["后端", "done"], ["测试", "run"], ["文档", "wait"]] },
+    { t: "API 限流中间件 + 单元测试", repo: "github.com/acme/gateway", st: "run", pct: 40, roles: [["后端", "run"], ["审查", "wait"]] },
+    { t: "CLI 安装脚本跨平台适配", repo: "github.com/iai/installer", st: "done", pct: 100, roles: [["实现", "done"], ["测试", "done"], ["文档", "done"]] },
+  ];
+}
+
+/** 团队成员节点（阶段 4 翻转为 GET /api/team）。 */
+export async function getTeam() {
+  return [
+    ["本机 · captain.7f3a", "队长", "GPT-4o", 1, "—"],
+    ["node.4a91", "后端", "Claude 3.5", 1, "2,180"],
+    ["node.7c20", "前端", "GPT-4o", 1, "1,540"],
+    ["node.b3df", "测试", "DeepSeek", 1, "980"],
+    ["node.19ae", "审查", "Claude 3.5", 1, "1,220"],
+    ["node.cc70", "文档", "本地 Qwen", 0, "640"],
+  ];
+}

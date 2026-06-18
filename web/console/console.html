@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>IAI Chain · 节点控制台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/shared/design-tokens.css">
+<style>
+  :root{
+    /* 共享色彩/字体见 ../shared/design-tokens.css；以下为控制台专属（含 --faint 微调与 --amber） */
+    --faint:oklch(62% 0.015 240);
+    --amber:oklch(82% 0.14 75);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font-family:var(--font-body);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;height:100vh;overflow:hidden}
+  .mono{font-family:var(--font-mono)}
+  .tnum{font-variant-numeric:tabular-nums}
+  ::selection{background:var(--accent);color:var(--bg-deep)}
+  a{color:inherit;text-decoration:none}
+
+  .app{display:grid;grid-template-columns:236px 1fr;height:100vh}
+
+  /* sidebar */
+  .side{background:var(--bg-deep);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:16px 12px}
+  .side .brand{display:flex;align-items:center;gap:10px;padding:6px 8px 18px;font-family:var(--font-display);font-weight:700}
+  .side .brand svg{width:26px;height:26px;flex:none}
+  .side .brand b{font-size:15px}.side .brand .zh{font-family:var(--font-mono);font-size:10px;color:var(--faint);border:1px solid var(--border);border-radius:5px;padding:1px 5px;font-weight:500}
+  .nav-group{font-family:var(--font-mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);padding:14px 10px 6px}
+  .nav-item{display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:8px;color:var(--muted);font-size:13.5px;cursor:pointer;transition:.13s;border:1px solid transparent}
+  .nav-item svg{width:17px;height:17px;flex:none;opacity:.85}
+  .nav-item:hover{background:var(--surface);color:var(--fg)}
+  .nav-item.on{background:var(--surface-2);color:var(--accent);border-color:var(--border-bright)}
+  .nav-item .badge{margin-left:auto;font-family:var(--font-mono);font-size:10.5px;background:oklch(80% 0.18 150 / .16);color:var(--green);padding:1px 6px;border-radius:5px}
+  .side .foot{margin-top:auto;padding:12px 10px 4px;border-top:1px solid var(--border);font-family:var(--font-mono);font-size:11px;color:var(--faint)}
+  .side .foot .v{color:var(--muted)}
+
+  /* main */
+  .main{display:flex;flex-direction:column;min-width:0;overflow:hidden}
+  .topbar{height:58px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:18px;padding:0 24px;background:oklch(15% 0.012 255 / .8);backdrop-filter:blur(10px)}
+  .node-id{display:flex;align-items:center;gap:10px;font-family:var(--font-mono);font-size:13px}
+  .node-id .role{color:var(--accent);font-weight:600}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-family:var(--font-mono);font-size:11.5px;padding:5px 11px;border-radius:999px;border:1px solid var(--border)}
+  .pill .dot{width:7px;height:7px;border-radius:50%}
+  .pill.online{color:var(--green);background:oklch(80% 0.18 150 / .1)}.pill.online .dot{background:var(--green);box-shadow:0 0 8px var(--green)}
+  .topbar .cmd{margin-left:8px;flex:1;max-width:340px;display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:12.5px;color:var(--faint);background:var(--bg-deep);border:1px solid var(--border);border-radius:8px;padding:7px 12px}
+  .topbar .cmd kbd{margin-left:auto;border:1px solid var(--border-bright);border-radius:4px;padding:0 5px;font-size:10.5px}
+  .wallet{margin-left:auto;display:flex;align-items:center;gap:9px;font-family:var(--font-mono);background:var(--surface);border:1px solid var(--border-bright);border-radius:9px;padding:7px 13px}
+  .wallet .coin{width:16px;height:16px;border-radius:50%;background:radial-gradient(circle at 35% 30%,oklch(90% 0.12 85),var(--gold));display:grid;place-items:center;color:var(--bg-deep);font-size:10px;font-weight:700}
+  .wallet b{color:var(--gold);font-size:14px}.wallet small{color:var(--faint);font-size:11px}
+  .btn{font-family:var(--font-display);font-weight:600;font-size:13px;border-radius:8px;padding:8px 14px;border:1px solid transparent;cursor:pointer;transition:.14s;white-space:nowrap}
+  .btn-pri{background:var(--accent);color:var(--bg-deep)}.btn-pri:hover{filter:brightness(1.08)}
+  .btn-ghost{background:transparent;border-color:var(--border-bright);color:var(--fg)}.btn-ghost:hover{border-color:var(--accent);color:var(--accent)}
+  .btn:active:not([disabled]){transform:translateY(1px)}
+  .btn[disabled]{opacity:.45;cursor:not-allowed}
+  :where(button,[role=button],input,a[href]):focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+  .empty{padding:28px 16px;text-align:center;color:var(--faint);font-size:13px}
+  .empty .ic{display:block;font-size:20px;opacity:.55;margin-bottom:8px}
+
+  .scroll{flex:1;overflow-y:auto;padding:24px}
+  .view{display:none}.view.on{display:block;animation:fade .3s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  .view-head{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+  .view-head h1{font-family:var(--font-display);font-size:22px;font-weight:700;letter-spacing:-.01em}
+  .view-head p{color:var(--muted);font-size:13px;margin-top:4px}
+
+  .grid{display:grid;gap:16px}
+  .g-3{grid-template-columns:repeat(3,1fr)}.g-2{grid-template-columns:1fr 1fr}.g-21{grid-template-columns:1.4fr 1fr}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:18px}
+  .card.deep{background:var(--bg-deep)}
+  .card h3{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);margin-bottom:14px;display:flex;align-items:center;justify-content:space-between}
+  .stat{font-family:var(--font-display);font-size:30px;font-weight:700;letter-spacing:-.02em;line-height:1}
+  .stat.a{color:var(--accent)}.stat.g{color:var(--gold)}.stat.gr{color:var(--green)}
+  .stat-sub{color:var(--muted);font-size:12.5px;margin-top:8px}
+  .meter{height:6px;border-radius:3px;background:var(--surface-2);overflow:hidden;margin-top:12px}
+  .meter i{display:block;height:100%;border-radius:3px;background:var(--accent)}
+
+  .kv{display:flex;justify-content:space-between;padding:8px 0;border-top:1px solid var(--border);font-size:13px}
+  .kv:first-of-type{border-top:0}
+  .kv .k{color:var(--muted)}.kv .v{font-family:var(--font-mono);color:var(--fg)}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-family:var(--font-mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);font-weight:500;padding:9px 10px}
+  td{padding:10px;border-top:1px solid var(--border)}
+  tbody tr{transition:background .13s}tbody tr:hover{background:var(--surface-2)}
+  .px{color:var(--gold);font-family:var(--font-mono)}.qty{color:var(--muted);font-family:var(--font-mono)}
+  tr.best .px::after{content:"最低价";font-family:var(--font-body);font-size:10px;color:var(--green);margin-left:8px;background:oklch(80% 0.18 150 / .14);padding:1px 6px;border-radius:5px}
+
+  .tag{display:inline-flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:11px;padding:3px 9px;border-radius:6px;border:1px solid var(--border)}
+  .tag.run{color:var(--amber);background:oklch(82% 0.14 75 / .12);border-color:transparent}
+  .tag.done{color:var(--green);background:oklch(80% 0.18 150 / .12);border-color:transparent}
+  .tag.role{color:var(--accent);background:oklch(80% 0.15 195 / .1);border-color:transparent}
+
+  .filter{display:flex;gap:6px;background:var(--bg-deep);border:1px solid var(--border);border-radius:9px;padding:4px;width:fit-content}
+  .filter button{font-family:var(--font-mono);font-size:12px;color:var(--muted);background:transparent;border:0;padding:6px 13px;border-radius:6px;cursor:pointer;transition:.13s}
+  .filter button.on{background:var(--surface-2);color:var(--accent)}
+
+  .task{border:1px solid var(--border);border-radius:11px;padding:16px;margin-bottom:12px;background:var(--surface)}
+  .task .top{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+  .task .ttl{font-family:var(--font-display);font-weight:600;font-size:14.5px}
+  .task .repo{font-family:var(--font-mono);font-size:11.5px;color:var(--faint);margin-left:auto}
+  .roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+  .role-chip{display:flex;align-items:center;gap:9px;background:var(--bg-deep);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:12.5px}
+  .role-chip .rn{font-family:var(--font-mono);color:var(--muted)}
+  .role-chip .st{margin-left:auto}
+  .role-chip .spin{width:11px;height:11px;border:2px solid var(--border-bright);border-top-color:var(--amber);border-radius:50%;animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .members{width:100%}
+  .members .who{display:flex;align-items:center;gap:10px}
+  .members .av{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;font-family:var(--font-mono);font-size:11px;background:var(--surface-2);border:1px solid var(--border-bright);color:var(--accent)}
+  .dot-s{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:7px}
+  .dot-s.on{background:var(--green);box-shadow:0 0 7px var(--green)}.dot-s.off{background:var(--faint)}
+
+  #ov-spark,#mk-chart{width:100%;display:block}
+  .market-grid{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;align-items:start}
+  .qty-in{background:var(--surface-2);border:1px solid var(--border);border-radius:7px;color:var(--fg);font-family:var(--font-mono);width:78px;padding:7px 9px;font-size:13px}
+  .ask-foot{display:flex;align-items:center;gap:10px;padding:14px 10px 2px;flex-wrap:wrap}
+  .ask-foot .lbl{font-size:12px;color:var(--faint)}
+  .notice{font-size:12px;color:var(--faint);margin-top:10px;display:flex;gap:8px;align-items:flex-start}
+  .notice b{color:var(--green)}
+
+  @media(max-width:1100px){.g-3{grid-template-columns:1fr 1fr}.g-21,.market-grid{grid-template-columns:1fr}}
+  @media(max-width:860px){
+    .app{grid-template-columns:1fr}
+    .side{position:fixed;z-index:50;left:0;top:0;bottom:0;width:236px;transform:translateX(-100%);transition:transform .2s}
+    .side.open{transform:none}
+    .menu-btn{display:grid !important}
+    .g-3,.g-2{grid-template-columns:1fr}
+    .topbar .cmd{display:none}
+  }
+  .menu-btn{display:none;place-items:center;width:36px;height:36px;border-radius:8px;border:1px solid var(--border-bright);background:transparent;color:var(--fg);cursor:pointer}
+  @media(prefers-reduced-motion:reduce){
+    .view.on{animation:none}
+    .spin{animation:none}
+    .btn:active:not([disabled]){transform:none}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- SIDEBAR -->
+  <aside class="side" id="side">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" fill="none"><rect x="1" y="1" width="30" height="30" rx="8" stroke="var(--accent)" stroke-width="1.5"/><circle cx="9" cy="9" r="2.6" fill="var(--accent)"/><circle cx="23" cy="9" r="2.6" fill="var(--gold)"/><circle cx="16" cy="22" r="2.6" fill="var(--green)"/><path d="M9 9 L23 9 M9 9 L16 22 M23 9 L16 22" stroke="var(--border-bright)" stroke-width="1.3"/></svg>
+      <b>IAI Chain</b><span class="zh">AI链</span>
+    </div>
+    <div class="nav-group">工作区</div>
+    <div class="nav-item on" data-view="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>概览</div>
+    <div class="nav-item" data-view="tasks"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h10M4 18h7"/></svg>任务<span class="badge">2 运行中</span></div>
+    <div class="nav-item" data-view="market"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h18l-2 11H5L3 6zM3 6L2 3"/><circle cx="9" cy="20" r="1"/><circle cx="17" cy="20" r="1"/></svg>市场</div>
+    <div class="nav-item" data-view="team"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="9" cy="7" r="3"/><path d="M3 21v-1a6 6 0 0 1 12 0v1M16 3.5a3 3 0 0 1 0 7"/></svg>团队<span class="badge">5 在线</span></div>
+    <div class="nav-group">账户</div>
+    <div class="nav-item" data-view="wallet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M16 12h2"/></svg>钱包</div>
+    <div class="side foot">本机节点 · <span class="v">captain.7f3a</span><br>iai-chain <span class="v" id="footVer">v0.4.2</span></div>
+  </aside>
+
+  <!-- MAIN -->
+  <div class="main">
+    <div class="topbar">
+      <button class="menu-btn" id="menuBtn" aria-label="打开导航" aria-expanded="false"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+      <div class="node-id"><span class="role">队长</span><span style="color:var(--faint)">·</span><span>captain.7f3a</span></div>
+      <span class="pill online"><span class="dot"></span>在线 · 模型已配置</span>
+      <div class="cmd">⌘K 运行命令…<kbd>iai</kbd></div>
+      <div class="wallet"><span class="coin">¥</span><b id="wbal" class="tnum">1,240</b><small>贡献币</small></div>
+      <button class="btn btn-pri" data-view="tasks" id="newTask">+ 新建任务</button>
+    </div>
+
+    <main class="scroll" role="main">
+      <!-- OVERVIEW -->
+      <section class="view on" data-view="overview">
+        <div class="view-head"><div><h1>概览</h1><p>本机作为队长节点，正在协调 1 个团队、2 个进行中的任务。</p></div></div>
+
+        <div class="grid g-3" style="margin-bottom:16px">
+          <div class="card"><h3>本机节点 <span class="pill online" style="padding:2px 8px"><span class="dot"></span>在线</span></h3>
+            <div class="stat a">42<span style="font-size:15px;color:var(--muted)">% 负载</span></div>
+            <div class="meter"><i style="width:42%"></i></div>
+            <div class="stat-sub">模型 GPT-4o · Claude · 本地 Ollama｜角色：队长</div>
+          </div>
+          <div class="card"><h3>网络</h3>
+            <div class="stat gr">5<span style="font-size:15px;color:var(--muted)"> 成员在线</span></div>
+            <div class="stat-sub">P2P 已发现 <span class="mono">23</span> 个节点 · <span class="mono">3</span> 个公开团队</div>
+          </div>
+          <div class="card"><h3>钱包</h3>
+            <div class="stat g tnum">1,240</div>
+            <div class="stat-sub">本周 <span style="color:var(--green)">+320</span> · 已锁定 80（任务中）</div>
+          </div>
+        </div>
+
+        <div class="grid g-21">
+          <div class="card">
+            <h3>当前任务 <a class="mono" style="color:var(--accent);cursor:pointer" data-view="tasks">全部 →</a></h3>
+            <div class="kv"><span class="k">实现 Rust JWT 鉴权模块</span><span class="v"><span class="tag run">运行中 75%</span></span></div>
+            <div class="kv"><span class="k">限流中间件 + 单元测试</span><span class="v"><span class="tag run">运行中 40%</span></span></div>
+            <div class="kv"><span class="k">CLI 安装脚本跨平台适配</span><span class="v"><span class="tag done">已采纳</span></span></div>
+          </div>
+          <div class="card deep">
+            <h3>贡献币 · 最低挂单 <a class="mono" style="color:var(--accent);cursor:pointer" data-view="market">市场 →</a></h3>
+            <div style="display:flex;align-items:baseline;gap:8px"><div class="stat g tnum" id="ov-px">¥0.86</div><span class="mono" id="ov-chg" style="font-size:12px"></span></div>
+            <svg id="ov-spark" height="56" preserveAspectRatio="none" role="img" aria-label="贡献币最低价近 24 小时走势"></svg>
+          </div>
+        </div>
+      </section>
+
+      <!-- TASKS -->
+      <section class="view" data-view="tasks">
+        <div class="view-head"><div><h1>任务</h1><p>按提示词分派给不同角色的成员节点，由各节点大模型协同完成。</p></div><div class="filter" id="taskFilter"><button class="on" data-f="all">全部</button><button data-f="run">运行中</button><button data-f="done">已采纳</button></div></div>
+        <div id="taskList"></div>
+      </section>
+
+      <!-- MARKET -->
+      <section class="view" data-view="market">
+        <div class="view-head"><div><h1>贡献币市场</h1><p>买方只能从最低价开始按顺序吃单。价格完全由自由市场决定。</p></div></div>
+        <div class="market-grid">
+          <div class="card deep">
+            <h3>挂卖簿 · LIVE</h3>
+            <table><thead><tr><th>单价 (¥/币)</th><th>数量</th><th>卖方节点</th></tr></thead><tbody id="askBody"></tbody></table>
+            <div class="ask-foot">
+              <label class="lbl" for="buyQty">买入数量</label>
+              <input class="qty-in tnum" id="buyQty" type="number" value="120" min="1" aria-label="买入数量（贡献币）">
+              <button class="btn btn-pri" id="buyBtn">按最低价买入</button>
+              <span class="lbl" id="buyEst"></span>
+            </div>
+            <div class="notice"><b>规则</b><span>成交永远从价格最低的挂单开始，逐笔向上吃单，直到买满数量为止。</span></div>
+          </div>
+          <div class="card">
+            <h3>价格走势 · 近 24h</h3>
+            <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px"><div class="stat g tnum" id="mk-px">¥0.86</div><span class="mono" id="mk-chg" style="font-size:12px"></span></div>
+            <svg id="mk-chart" height="150" preserveAspectRatio="none" role="img" aria-label="贡献币价格近 24 小时走势"></svg>
+            <div class="kv" style="margin-top:10px"><span class="k">我的挂卖</span><span class="v">0 币</span></div>
+            <div class="kv"><span class="k">我的求购</span><span class="v">120 币 @ ≤¥0.95</span></div>
+            <button class="btn btn-ghost" style="width:100%;margin-top:12px">+ 挂卖 / 求购</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- TEAM -->
+      <section class="view" data-view="team">
+        <div class="view-head"><div><h1>团队成员节点</h1><p>队长与队员都需配置大模型，才是具备 AI 能力的节点。</p></div><button class="btn btn-ghost">+ 招募 / 邀请</button></div>
+        <div class="card deep">
+          <table class="members"><thead><tr><th>节点</th><th>角色</th><th>模型</th><th>状态</th><th>累计贡献</th></tr></thead><tbody id="teamBody"></tbody></table>
+        </div>
+      </section>
+
+      <!-- WALLET -->
+      <section class="view" data-view="wallet">
+        <div class="view-head"><div><h1>钱包</h1><p>贡献者赚币，需求方花币驱动任务。</p></div></div>
+        <div class="grid g-3" style="margin-bottom:16px">
+          <div class="card"><h3>可用余额</h3><div class="stat g tnum">1,240</div><div class="stat-sub">贡献币</div></div>
+          <div class="card"><h3>任务中锁定</h3><div class="stat tnum" style="color:var(--amber)">80</div><div class="stat-sub">2 个进行中任务</div></div>
+          <div class="card"><h3>本周收益</h3><div class="stat gr tnum">+320</div><div class="stat-sub">3 笔被采纳的提交</div></div>
+        </div>
+        <div class="card deep"><h3>近期流水</h3>
+          <table><thead><tr><th>时间</th><th>类型</th><th>说明</th><th style="text-align:right">变动</th></tr></thead><tbody id="ledgerBody"></tbody></table>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script type="module" src="/console/app.js"></script>
+</body>
+</html>

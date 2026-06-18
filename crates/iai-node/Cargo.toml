@@ -1,0 +1,13 @@
+[package]
+name = "iai-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 节点运行层（IAI Node Layer）：能力容器 / 节点注册 / P2P 发现 / Provider 适配
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

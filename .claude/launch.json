@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "iai",
+      "runtimeExecutable": "/Users/lishiguang/aiworkspace/iai/target/debug/iai",
+      "runtimeArgs": ["serve", "--port", "8788"],
+      "port": 8788
+    }
+  ]
+}

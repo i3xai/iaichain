@@ -1,0 +1,29 @@
+[package]
+name = "iai-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "iai"
+path = "src/main.rs"
+
+# 应用层（Client Layer）：clap 子命令 + 本地 HTTP API（axum）+ 内嵌静态前端
+[dependencies]
+iai-core.workspace = true
+iai-node.workspace = true
+iai-economic.workspace = true
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rusqlite.workspace = true
+
+clap = { version = "4", features = ["derive"] }
+axum = "0.7"
+tower = "0.5"
+rust-embed = "8"
+mime_guess = "2"

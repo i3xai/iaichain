@@ -1,0 +1,17 @@
+# Rust 构建产物
+/target
+
+# 节点运行时数据（SQLite / 日志）
+.iai/
+.iai_dev/
+*.log
+
+# 工具运行时状态
+.omc/
+
+# 本地个人配置（保留 .claude/launch.json）
+.claude/settings.local.json
+.claude/skills/
+
+# 系统
+.DS_Store

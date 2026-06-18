@@ -1,0 +1,26 @@
+/* IAI Chain · 共享设计 token（唯一事实源同步自 design/DESIGN.md）
+ *
+ * 落地页与控制台共用以下颜色与字体变量。页面专属变量（如 --maxw / --amber /
+ * 各页微调的 --faint）保留在各自页面的内联 :root 中，且因晚于本文件加载而生效覆盖。
+ */
+:root {
+  /* 色彩（OKLch） */
+  --bg:            oklch(15% 0.012 255); /* 页面底色（近黑微蓝） */
+  --bg-deep:       oklch(11% 0.01 255);  /* 终端 / 代码块 / 图表底 */
+  --surface:       oklch(19% 0.014 255); /* 卡片 */
+  --surface-2:     oklch(23% 0.016 255); /* 卡片悬浮 / 内嵌控件 */
+  --fg:            oklch(95% 0.008 240); /* 主文字 */
+  --muted:         oklch(68% 0.015 240); /* 次文字 */
+  --faint:         oklch(54% 0.015 240); /* 元信息 / mono 标签（落地页基准） */
+  --border:        oklch(28% 0.014 255); /* 分隔线 */
+  --border-bright: oklch(38% 0.02 255);  /* 强调边框 / 悬浮 */
+  --accent:        oklch(80% 0.15 195);  /* 唯一主强调色（青），每屏≤2 次 */
+  --gold:          oklch(83% 0.13 80);   /* 贡献币经济专属第二色 */
+  --green:         oklch(80% 0.18 150);  /* 终端 prompt / 成功状态 */
+  --red:           oklch(68% 0.19 25);   /* 下跌 / 危险状态 */
+
+  /* 字体 */
+  --font-display: "Space Grotesk", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-body:    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono:    "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+}

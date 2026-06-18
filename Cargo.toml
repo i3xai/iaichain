@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/iai-cli",
+    "crates/iai-core",
+    "crates/iai-node",
+    "crates/iai-economic",
+]
+
+[workspace.package]
+version = "0.4.2"
+edition = "2021"
+rust-version = "1.83"
+license = "MIT"
+
+[workspace.dependencies]
+# 异步运行时 / 错误模型 / 序列化（全 workspace 共用版本）
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+sha2 = "0.10"
+
+# 内部 crate 互引
+iai-core = { path = "crates/iai-core" }
+iai-node = { path = "crates/iai-node" }
+iai-economic = { path = "crates/iai-economic" }
