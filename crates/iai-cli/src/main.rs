@@ -9,8 +9,8 @@ mod storage;
 mod api;
 
 use clap::Parser;
-use cli::{Cli, Command, LedgerCmd, ModelCmd, NodeCmd};
-use iai_economic::{credit, ledger, ledger::LedgerKind};
+use cli::{Cli, Command, LedgerCmd, MarketCmd, ModelCmd, NodeCmd};
+use iai_economic::{credit, ledger, ledger::LedgerKind, market};
 use iai_node::Provider;
 
 #[tokio::main]
@@ -29,6 +29,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Node { action } => run_node(action),
         Command::Wallet => run_wallet(),
         Command::Ledger { action } => run_ledger(action),
+        Command::Market { action } => run_market(action),
         Command::Version => {
             println!("iai-chain {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -145,6 +146,44 @@ fn run_ledger(action: LedgerCmd) -> anyhow::Result<()> {
             };
             let e = storage::append_entry(&conn, kind, &node_id, amount, locked, &note)?;
             println!("✓ 已记账 seq={} {} {}", e.seq, e.kind.display_zh(), signed(e.amount));
+        }
+    }
+    Ok(())
+}
+
+fn run_market(action: MarketCmd) -> anyhow::Result<()> {
+    let conn = storage::open_conn()?;
+    match action {
+        MarketCmd::Book => {
+            let asks = storage::list_asks_asc(&conn)?;
+            if asks.is_empty() {
+                println!("（挂卖簿为空，用 `iai market sell --px <价> --qty <量>` 挂单）");
+            } else {
+                for a in asks {
+                    println!("¥{:.2}  ×{:<6} {}", market::yuan(a.px_cents), a.qty, a.node_id);
+                }
+            }
+        }
+        MarketCmd::Sell { px, qty, node } => {
+            let node_id = match node {
+                Some(n) => n,
+                None => storage::ensure_node(&conn)?,
+            };
+            let a = storage::add_ask(&conn, market::cents_from_yuan(px), qty, &node_id)?;
+            println!("✓ 已挂卖 {} 币 @ ¥{:.2} · {}", a.qty, market::yuan(a.px_cents), a.node_id);
+        }
+        MarketCmd::Buy { qty } => {
+            let node = storage::ensure_node(&conn)?;
+            let out = storage::execute_buy(&conn, &node, qty)?;
+            if out.filled == 0 {
+                println!("无可成交挂单");
+            } else {
+                println!(
+                    "✓ 成交 {} 币 · ¥{:.2}（已计入账本买入）",
+                    out.filled,
+                    market::yuan(out.cost_cents)
+                );
+            }
         }
     }
     Ok(())

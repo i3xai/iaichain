@@ -101,22 +101,26 @@ export async function getLedger() {
   }
 }
 
-/* ───────────── 阶段 3 将翻转：市场 ───────────── */
+/* ───────────── 阶段 3：已对接真实后端（市场） ───────────── */
 
-/** 挂卖簿（阶段 3 翻转为 GET /api/market/book）。 */
+/** 挂卖簿（价格升序）。返回 [{ px, qty, node }]。 */
 export async function getMarketBook() {
-  return [
-    { px: 0.86, qty: 80, node: "node.4a91" },
-    { px: 0.88, qty: 150, node: "node.7c20" },
-    { px: 0.91, qty: 60, node: "node.b3df" },
-    { px: 0.95, qty: 220, node: "node.19ae" },
-    { px: 1.02, qty: 130, node: "node.cc70" },
-  ];
+  try {
+    return await getJSON("/api/market/book");
+  } catch {
+    return [];
+  }
 }
 
-/** 价格走势序列（阶段 3 翻转为 GET /api/market/price?range=24h）。
- *  阶段 0 在前端生成一段以 endPx 收尾的随机游走，行为同原设计稿。 */
+/** 价格走势序列。返回 [{ i, px }]。
+ *  真实价格点 ≥2 时直接用；不足时退化为以 endPx 收尾的随机游走（保持设计观感）。 */
 export async function getPriceSeries(endPx) {
+  try {
+    const pts = await getJSON("/api/market/price");
+    if (Array.isArray(pts) && pts.length >= 2) return pts;
+  } catch {
+    /* 离线兜底走下方合成序列 */
+  }
   const N = 64;
   const data = [];
   let p = 0.78;
@@ -125,25 +129,37 @@ export async function getPriceSeries(endPx) {
     p = Math.max(0.62, Math.min(1.05, p));
     data.push({ i, px: p });
   }
-  data[N - 1].px = endPx;
+  if (endPx && endPx > 0) data[N - 1].px = endPx;
   return data;
 }
 
-/** 按最低价买入（阶段 3 翻转为 POST /api/market/buy，由服务端撮合 + 记账）。
- *  阶段 0 在前端按「从最低价逐笔向上吃单」就地撮合，返回成交结果与新簿。 */
+/** 按最低价买入：POST /api/market/buy，由服务端撮合 + 记账（FR-012）。
+ *  返回 { orders（新簿）, filled, cost }。`orders` 形参仅为兼容旧签名，撮合以服务端为准。 */
 export async function buyAtLowest(orders, need) {
-  const sorted = orders.slice().sort((a, b) => a.px - b.px);
-  let cost = 0;
-  let filled = 0;
-  let n = need;
-  for (let i = 0; i < sorted.length && n > 0; i++) {
-    const take = Math.min(n, sorted[i].qty);
-    cost += take * sorted[i].px;
-    filled += take;
-    n -= take;
-    sorted[i].qty -= take;
+  const res = await fetch(BASE + "/api/market/buy", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ qty: need }),
+  });
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.error || `HTTP ${res.status}`);
   }
-  return { orders: sorted.filter((o) => o.qty > 0), filled, cost };
+  return res.json(); // { orders, filled, cost }
+}
+
+/** 挂出卖单：POST /api/market/sell { px, qty, node? }。 */
+export async function sellAsk(body) {
+  const res = await fetch(BASE + "/api/market/sell", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.error || `HTTP ${res.status}`);
+  }
+  return res.json();
 }
 
 /* ───────────── 阶段 5 将翻转：任务 / 团队 ───────────── */

@@ -8,6 +8,7 @@
 
 use anyhow::Context;
 use iai_economic::ledger::{self, LedgerEntry, LedgerKind};
+use iai_economic::market::{self, Ask};
 use iai_node::{derive_capabilities, gen_node_id, NodeRole, NodeStatus, Provider};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::PathBuf;
@@ -111,6 +112,26 @@ fn apply_migrations(conn: &Connection) -> anyhow::Result<()> {
         )
         .context("应用迁移 v2 失败")?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (2)", [])?;
+    }
+
+    // v3：市场挂卖簿 + 价格历史点。
+    if applied < 3 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS market_ask (
+                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                 px_cents   INTEGER NOT NULL,
+                 qty        INTEGER NOT NULL,
+                 node_id    TEXT NOT NULL,
+                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             CREATE TABLE IF NOT EXISTS price_point (
+                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                 ts_epoch INTEGER NOT NULL,
+                 px_cents INTEGER NOT NULL
+             );",
+        )
+        .context("应用迁移 v3 失败")?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (3)", [])?;
     }
 
     Ok(())
@@ -240,7 +261,25 @@ fn map_entry(r: &Row) -> rusqlite::Result<LedgerEntry> {
 ///
 /// 阶段 3 市场买卖、阶段 5 任务锁定、阶段 6 结算分发都复用本函数，确保所有经济事件
 /// 都进入同一条防篡改链。
-pub fn append_entry(
+fn next_seq_and_prev(conn: &Connection) -> anyhow::Result<(u64, String)> {
+    let last: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT seq, entry_hash FROM ledger ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match last {
+        Some((s, h)) => (s as u64 + 1, h),
+        None => (1, ledger::GENESIS_PREV.to_string()),
+    })
+}
+
+/// 在当前连接/事务内插入一条账本记录（**不自管事务**）。
+///
+/// 既供 [`append_entry`] 包一层事务使用，也供市场撮合 [`execute_buy`] 在同一事务内
+/// 落账 —— 保证「扣减挂单」与「买入记账」原子提交。
+fn insert_entry(
     conn: &Connection,
     kind: LedgerKind,
     node_id: &str,
@@ -248,28 +287,16 @@ pub fn append_entry(
     locked_delta: i64,
     note: &str,
 ) -> anyhow::Result<LedgerEntry> {
-    let tx = conn.unchecked_transaction()?;
-    let last: Option<(i64, String)> = tx
-        .query_row(
-            "SELECT seq, entry_hash FROM ledger ORDER BY seq DESC LIMIT 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let (seq, prev) = match last {
-        Some((s, h)) => (s as u64 + 1, h),
-        None => (1, ledger::GENESIS_PREV.to_string()),
-    };
+    let (seq, prev) = next_seq_and_prev(conn)?;
     let ts = now_epoch();
     let entry_hash =
         ledger::compute_entry_hash(seq, ts, kind, node_id, amount, locked_delta, note, &prev);
-    tx.execute(
+    conn.execute(
         "INSERT INTO ledger (seq, ts_epoch, kind, node_id, amount, locked_delta, note, prev_hash, entry_hash)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![seq as i64, ts, kind.as_str(), node_id, amount, locked_delta, note, prev, entry_hash],
     )
     .context("写入账本记录失败")?;
-    tx.commit()?;
     Ok(LedgerEntry {
         seq,
         ts_epoch: ts,
@@ -281,6 +308,21 @@ pub fn append_entry(
         prev_hash: prev,
         entry_hash,
     })
+}
+
+/// 追加一条账本记录（自管事务）。
+pub fn append_entry(
+    conn: &Connection,
+    kind: LedgerKind,
+    node_id: &str,
+    amount: i64,
+    locked_delta: i64,
+    note: &str,
+) -> anyhow::Result<LedgerEntry> {
+    let tx = conn.unchecked_transaction()?;
+    let e = insert_entry(&tx, kind, node_id, amount, locked_delta, note)?;
+    tx.commit()?;
+    Ok(e)
 }
 
 /// 最近 `limit` 条记录（seq 倒序，最新在前 —— 供前端流水展示）。
@@ -299,6 +341,90 @@ pub fn all_entries_asc(conn: &Connection) -> anyhow::Result<Vec<LedgerEntry>> {
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map([], map_entry)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/* ---------- 阶段 3：市场 ---------- */
+
+fn map_ask(r: &Row) -> rusqlite::Result<Ask> {
+    Ok(Ask {
+        id: r.get(0)?,
+        px_cents: r.get(1)?,
+        qty: r.get(2)?,
+        node_id: r.get(3)?,
+    })
+}
+
+/// 挂卖簿（价格升序，最低价在前 —— 即最优成交顺序）。
+pub fn list_asks_asc(conn: &Connection) -> anyhow::Result<Vec<Ask>> {
+    let mut stmt =
+        conn.prepare("SELECT id, px_cents, qty, node_id FROM market_ask ORDER BY px_cents ASC, id ASC")?;
+    let rows = stmt.query_map([], map_ask)?.collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 当前最低挂单价（分）。空簿返回 None。
+fn lowest_px(conn: &Connection) -> anyhow::Result<Option<i64>> {
+    let v: Option<i64> = conn.query_row("SELECT MIN(px_cents) FROM market_ask", [], |r| r.get(0))?;
+    Ok(v)
+}
+
+/// 记录一个价格历史点（当前最低挂单价）。空簿则跳过。
+fn record_price_point(conn: &Connection) -> anyhow::Result<()> {
+    if let Some(px) = lowest_px(conn)? {
+        conn.execute(
+            "INSERT INTO price_point (ts_epoch, px_cents) VALUES (?1, ?2)",
+            params![now_epoch(), px],
+        )?;
+    }
+    Ok(())
+}
+
+/// 挂出一个卖单，并记录价格点。
+pub fn add_ask(conn: &Connection, px_cents: i64, qty: i64, node_id: &str) -> anyhow::Result<Ask> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO market_ask (px_cents, qty, node_id) VALUES (?1, ?2, ?3)",
+        params![px_cents, qty, node_id],
+    )?;
+    let id = tx.last_insert_rowid();
+    record_price_point(&tx)?;
+    tx.commit()?;
+    Ok(Ask { id, px_cents, qty, node_id: node_id.to_string() })
+}
+
+/// 买入成交结果。
+pub struct BuyOutcome {
+    pub filled: i64,
+    pub cost_cents: i64,
+}
+
+/// 按最低价逐笔吃单：扣减挂单 + 买入落账 + 记录价格点，全程原子提交。
+pub fn execute_buy(conn: &Connection, buyer_node: &str, need: i64) -> anyhow::Result<BuyOutcome> {
+    let tx = conn.unchecked_transaction()?;
+    let asks = list_asks_asc(&tx)?;
+    let plan = market::plan_buy(&asks, need);
+    for (id, take) in &plan.takes {
+        tx.execute("UPDATE market_ask SET qty = qty - ?1 WHERE id = ?2", params![take, id])?;
+    }
+    tx.execute("DELETE FROM market_ask WHERE qty <= 0", [])?;
+    if plan.filled > 0 {
+        let note = format!("市场购入 {} 币 · ¥{:.2}", plan.filled, plan.cost_cents as f64 / 100.0);
+        insert_entry(&tx, LedgerKind::Buy, buyer_node, plan.filled, 0, &note)?;
+    }
+    record_price_point(&tx)?;
+    tx.commit()?;
+    Ok(BuyOutcome { filled: plan.filled, cost_cents: plan.cost_cents })
+}
+
+/// 价格历史点（按时间升序，最近 `limit` 个），单位：分。
+pub fn list_price_points(conn: &Connection, limit: u32) -> anyhow::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT px_cents FROM (SELECT id, px_cents FROM price_point ORDER BY id DESC LIMIT ?1) ORDER BY id ASC",
+    )?;
+    let rows = stmt
+        .query_map([limit as i64], |r| r.get::<_, i64>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }

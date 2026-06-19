@@ -52,10 +52,16 @@ function estimate() {
 document.getElementById("buyQty").addEventListener("input", estimate);
 document.getElementById("buyBtn").addEventListener("click", async function () {
   var need = parseInt(document.getElementById("buyQty").value, 10) || 0;
-  var res = await buyAtLowest(orders, need);
-  orders = res.orders; renderAsk();
-  var bal = document.getElementById("wbal"); bal.textContent = (parseInt(bal.textContent.replace(/,/g, ""), 10) + res.filled).toLocaleString();
-  this.textContent = "成交 " + res.filled + " 币 · ¥" + res.cost.toFixed(2); var self = this; setTimeout(function () { self.textContent = "按最低价买入"; }, 2200);
+  var self = this;
+  try {
+    var res = await buyAtLowest(orders, need);
+    orders = res.orders; renderAsk();
+    renderWallet(); // 服务端已撮合并记账，刷新真实余额与流水
+    self.textContent = "成交 " + res.filled + " 币 · ¥" + Number(res.cost).toFixed(2);
+  } catch (e) {
+    self.textContent = "成交失败";
+  }
+  setTimeout(function () { self.textContent = "按最低价买入"; }, 2200);
 });
 
 // ---- tasks（数据来自 api.getTasks） ----

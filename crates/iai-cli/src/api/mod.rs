@@ -6,10 +6,10 @@
 
 use axum::{
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
-use iai_economic::{credit, ledger};
+use iai_economic::{credit, ledger, market};
 use iai_node::Provider;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -42,6 +42,10 @@ pub fn router() -> Router {
         .route("/api/node/models", get(list_models).post(add_model))
         .route("/api/wallet", get(wallet))
         .route("/api/ledger", get(ledger_list))
+        .route("/api/market/book", get(market_book))
+        .route("/api/market/price", get(market_price))
+        .route("/api/market/buy", post(market_buy))
+        .route("/api/market/sell", post(market_sell))
         .fallback(static_handler)
 }
 
@@ -164,4 +168,74 @@ async fn ledger_list() -> ApiResult {
         })
         .collect();
     Ok(Json(Value::Array(items)))
+}
+
+/* ---------- 阶段 3：市场 ---------- */
+
+fn ask_json(px_cents: i64, qty: i64, node: &str) -> Value {
+    json!({ "px": market::yuan(px_cents), "qty": qty, "node": node })
+}
+
+/// GET /api/market/book —— 挂卖簿（价格升序），直接返回数组。
+async fn market_book() -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let asks = storage::list_asks_asc(&conn).map_err(err500)?;
+    let items: Vec<Value> = asks.iter().map(|a| ask_json(a.px_cents, a.qty, &a.node_id)).collect();
+    Ok(Json(Value::Array(items)))
+}
+
+/// GET /api/market/price —— 价格历史点 [{ i, px }]（时间升序）。
+async fn market_price() -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let pts = storage::list_price_points(&conn, 64).map_err(err500)?;
+    let items: Vec<Value> = pts
+        .iter()
+        .enumerate()
+        .map(|(i, px)| json!({ "i": i, "px": market::yuan(*px) }))
+        .collect();
+    Ok(Json(Value::Array(items)))
+}
+
+#[derive(Deserialize)]
+struct BuyReq {
+    qty: i64,
+}
+
+/// POST /api/market/buy —— 本机按最低价买入；返回新簿 + 成交量 + 成交额。
+async fn market_buy(Json(req): Json<BuyReq>) -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let node = storage::ensure_node(&conn).map_err(err500)?;
+    let out = storage::execute_buy(&conn, &node, req.qty).map_err(err500)?;
+    let asks = storage::list_asks_asc(&conn).map_err(err500)?;
+    let orders: Vec<Value> = asks.iter().map(|a| ask_json(a.px_cents, a.qty, &a.node_id)).collect();
+    Ok(Json(json!({
+        "orders": orders,
+        "filled": out.filled,
+        "cost": market::yuan(out.cost_cents),
+    })))
+}
+
+#[derive(Deserialize)]
+struct SellReq {
+    px: f64,
+    qty: i64,
+    node: Option<String>,
+}
+
+/// POST /api/market/sell —— 挂出卖单。
+async fn market_sell(Json(req): Json<SellReq>) -> ApiResult {
+    if req.qty <= 0 || req.px <= 0.0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "px 与 qty 必须为正" })),
+        ));
+    }
+    let conn = storage::open_conn().map_err(err500)?;
+    let node = match req.node {
+        Some(n) if !n.trim().is_empty() => n,
+        _ => storage::ensure_node(&conn).map_err(err500)?,
+    };
+    let px_cents = market::cents_from_yuan(req.px);
+    let ask = storage::add_ask(&conn, px_cents, req.qty, &node).map_err(err500)?;
+    Ok(Json(json!({ "ok": true, "ask": ask_json(ask.px_cents, ask.qty, &ask.node_id) })))
 }

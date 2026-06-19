@@ -40,8 +40,36 @@ pub enum Command {
         #[command(subcommand)]
         action: LedgerCmd,
     },
+    /// 市场：挂卖簿 / 挂卖 / 买入。
+    Market {
+        #[command(subcommand)]
+        action: MarketCmd,
+    },
     /// 打印版本号。
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MarketCmd {
+    /// 查看挂卖簿（价格升序，最低价在前）。
+    Book,
+    /// 挂出卖单：iai market sell --px 0.90 --qty 100。
+    Sell {
+        /// 单价（元/币）。
+        #[arg(long)]
+        px: f64,
+        /// 数量。
+        #[arg(long)]
+        qty: i64,
+        /// 卖方节点（默认本机）。
+        #[arg(long)]
+        node: Option<String>,
+    },
+    /// 按最低价买入：iai market buy --qty 120（成交计入账本）。
+    Buy {
+        #[arg(long)]
+        qty: i64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
