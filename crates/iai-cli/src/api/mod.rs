@@ -144,7 +144,8 @@ async fn add_model(Json(req): Json<AddModelReq>) -> ApiResult {
 /// GET /api/wallet —— 由账本推导的钱包视图。
 async fn wallet() -> ApiResult {
     let conn = storage::open_conn().map_err(err500)?;
-    let entries = storage::all_entries_asc(&conn).map_err(err500)?;
+    let self_id = storage::ensure_node(&conn).map_err(err500)?;
+    let entries = storage::entries_for(&conn, &self_id).map_err(err500)?;
     let w = credit::derive_wallet(&entries, storage::now_epoch());
     Ok(Json(json!({
         "balance": w.balance,
@@ -158,7 +159,8 @@ async fn wallet() -> ApiResult {
 /// GET /api/ledger —— 最近账本流水（最新在前），直接返回数组。
 async fn ledger_list() -> ApiResult {
     let conn = storage::open_conn().map_err(err500)?;
-    let entries = storage::list_ledger_desc(&conn, 50).map_err(err500)?;
+    let self_id = storage::ensure_node(&conn).map_err(err500)?;
+    let entries = storage::list_ledger_desc_for(&conn, &self_id, 50).map_err(err500)?;
     let items: Vec<Value> = entries
         .iter()
         .map(|e| {

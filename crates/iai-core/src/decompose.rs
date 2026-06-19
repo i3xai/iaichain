@@ -13,7 +13,7 @@ pub struct RoleSpec {
 pub fn decompose(prompt: &str) -> Vec<RoleSpec> {
     let p = prompt;
     let mut roles: Vec<String> = Vec::new();
-    let mut push = |r: &str, roles: &mut Vec<String>| {
+    let push = |r: &str, roles: &mut Vec<String>| {
         if !roles.iter().any(|x| x == r) {
             roles.push(r.to_string());
         }

@@ -1,5 +1,5 @@
 // 落地页逻辑（ES module）。数据一律经 ../shared/api.js 接缝层取得。
-import { getMarketBook, getPriceSeries, buyAtLowest } from "/shared/api.js";
+import { getMarketBook, getPriceSeries, buyAtLowest, getVersion } from "/shared/api.js";
 
 var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -118,6 +118,8 @@ var copyText = { mac: "brew install iai-chain", linux: "curl -fsSL https://iaiai
 var codeEl = document.getElementById("inst-code"), copyEl = document.getElementById("inst-copy");
 function setOS(os) { codeEl.innerHTML = snippets[os]; copyEl.setAttribute("data-copy", copyText[os]); document.querySelectorAll(".tab").forEach(function (t) { t.classList.toggle("on", t.dataset.os === os); }); }
 document.querySelectorAll(".tab").forEach(function (t) { t.addEventListener("click", function () { setOS(t.dataset.os); }); });
+// 安装区版本对齐真实二进制（/api/version）
+try { var ver = (await getVersion()).version; snippets.linux = snippets.linux.replace(/\d+\.\d+\.\d+/, ver); } catch (e) { /* 离线保留默认 */ }
 setOS("mac");
 
 // ---------- feature hover glow ----------

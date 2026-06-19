@@ -380,22 +380,40 @@ pub fn append_entry(
     Ok(e)
 }
 
-/// 最近 `limit` 条记录（seq 倒序，最新在前 —— 供前端流水展示）。
-pub fn list_ledger_desc(conn: &Connection, limit: u32) -> anyhow::Result<Vec<LedgerEntry>> {
-    let sql = format!("SELECT {ENTRY_COLS} FROM ledger ORDER BY seq DESC LIMIT ?1");
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map([limit as i64], map_entry)?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
-/// 全量记录（seq 升序 —— 供链校验与钱包推导）。
+/// 全量记录（seq 升序 —— 供链校验，跨所有节点）。
 pub fn all_entries_asc(conn: &Connection) -> anyhow::Result<Vec<LedgerEntry>> {
     let sql = format!("SELECT {ENTRY_COLS} FROM ledger ORDER BY seq ASC");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map([], map_entry)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 本机视角账本（按 node_id 过滤，seq 升序）—— 钱包推导用。
+///
+/// 阶段 6 起，结算会把贡献点记到「成员节点」名下（去中心化下各节点各有账户），
+/// 故本机钱包只汇总本机 node_id 的条目；链校验 [`all_entries_asc`] 仍覆盖全链。
+pub fn entries_for(conn: &Connection, node: &str) -> anyhow::Result<Vec<LedgerEntry>> {
+    let sql = format!("SELECT {ENTRY_COLS} FROM ledger WHERE node_id = ?1 ORDER BY seq ASC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![node], map_entry)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 本机视角流水（最新在前）。
+pub fn list_ledger_desc_for(
+    conn: &Connection,
+    node: &str,
+    limit: u32,
+) -> anyhow::Result<Vec<LedgerEntry>> {
+    let sql =
+        format!("SELECT {ENTRY_COLS} FROM ledger WHERE node_id = ?1 ORDER BY seq DESC LIMIT ?2");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![node, limit as i64], map_entry)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -584,7 +602,6 @@ pub struct TaskRow {
 /// 子任务（持久化形态）。
 pub struct SubtaskRow {
     pub subtask_id: String,
-    pub seq: i64,
     pub role: String,
     pub assigned_node: Option<String>,
     pub status: String,
@@ -699,22 +716,66 @@ pub fn list_tasks(conn: &Connection) -> anyhow::Result<Vec<TaskRow>> {
 fn map_subtask(r: &Row) -> rusqlite::Result<SubtaskRow> {
     Ok(SubtaskRow {
         subtask_id: r.get(0)?,
-        seq: r.get(1)?,
-        role: r.get(2)?,
-        assigned_node: r.get(3)?,
-        status: r.get(4)?,
-        attempts: r.get(5)?,
+        role: r.get(1)?,
+        assigned_node: r.get(2)?,
+        status: r.get(3)?,
+        attempts: r.get(4)?,
     })
 }
 
 /// 某任务的子任务（按 seq 升序）。
 pub fn list_subtasks(conn: &Connection, task_id: &str) -> anyhow::Result<Vec<SubtaskRow>> {
     let mut stmt = conn.prepare(
-        "SELECT subtask_id, seq, role, assigned_node, status, attempts FROM subtask
+        "SELECT subtask_id, role, assigned_node, status, attempts FROM subtask
          WHERE task_id = ?1 ORDER BY seq ASC",
     )?;
     let rows = stmt
         .query_map(params![task_id], map_subtask)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// 结算结果。
+pub struct SettleResult {
+    pub total: i64,
+    pub nodes: i64,
+}
+
+/// 结算闭环（`Aggregated → Settled`）：对每个通过质量门禁的 done 子任务，
+/// 按 `120 × 裁判分` 向其执行节点分发贡献点 —— 写入哈希链账本（FR-010/011）并累加
+/// 团队成员的累计贡献。挂单扣减/买入/结算共用同一条防篡改链。原子提交。
+pub fn settle_task(conn: &Connection, task_id: &str, title: &str) -> anyhow::Result<SettleResult> {
+    let self_id = ensure_node(conn)?;
+    let dones: Vec<(String, Option<String>, f64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT role, assigned_node, COALESCE(quality_score, 0.7) FROM subtask
+             WHERE task_id = ?1 AND status = 'done' ORDER BY seq",
+        )?;
+        let rows = stmt
+            .query_map(params![task_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, f64>(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    let tx = conn.unchecked_transaction()?;
+    let mut total = 0i64;
+    let mut seen: Vec<String> = Vec::new();
+    for (role, node, score) in dones {
+        let node = node.unwrap_or_else(|| self_id.clone());
+        let reward = (120.0 * score).round() as i64;
+        let note = format!("任务「{title}」{role}提交被采纳");
+        insert_entry(&tx, LedgerKind::Settle, &node, reward, 0, &note)?;
+        tx.execute(
+            "UPDATE team_member SET credits = credits + ?1 WHERE node_id = ?2",
+            params![reward, node],
+        )?;
+        total += reward;
+        if !seen.contains(&node) {
+            seen.push(node);
+        }
+    }
+    tx.commit()?;
+    Ok(SettleResult { total, nodes: seen.len() as i64 })
 }

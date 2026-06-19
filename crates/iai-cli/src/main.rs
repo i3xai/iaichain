@@ -100,7 +100,8 @@ fn run_node(action: NodeCmd) -> anyhow::Result<()> {
 
 fn run_wallet() -> anyhow::Result<()> {
     let conn = storage::open_conn()?;
-    let entries = storage::all_entries_asc(&conn)?;
+    let self_id = storage::ensure_node(&conn)?;
+    let entries = storage::entries_for(&conn, &self_id)?;
     let w = credit::derive_wallet(&entries, storage::now_epoch());
     println!("可用余额  {}", w.balance);
     println!("任务锁定  {}", w.locked);
@@ -116,7 +117,8 @@ fn run_ledger(action: LedgerCmd) -> anyhow::Result<()> {
     let conn = storage::open_conn()?;
     match action {
         LedgerCmd::List { limit } => {
-            let entries = storage::list_ledger_desc(&conn, limit)?;
+            let self_id = storage::ensure_node(&conn)?;
+            let entries = storage::list_ledger_desc_for(&conn, &self_id, limit)?;
             if entries.is_empty() {
                 println!("（账本为空，用 `iai ledger record …` 记账）");
             } else {
@@ -285,11 +287,13 @@ async fn run_task_cmd(action: TaskCmd) -> anyhow::Result<()> {
             println!("任务 {}  状态 {}", t.task_id, t.state.display_zh());
             println!("仓库 {}", t.repo);
             for s in storage::list_subtasks(&conn, &id)? {
+                let retry = if s.attempts > 1 { format!(" (重试 {})", s.attempts) } else { String::new() };
                 println!(
-                    "  {:<6} [{}] {}",
+                    "  {:<6} [{}] {}{}",
                     s.role,
                     s.status,
-                    s.assigned_node.unwrap_or_else(|| "-".into())
+                    s.assigned_node.unwrap_or_else(|| "-".into()),
+                    retry
                 );
             }
             if let Some(r) = t.result {

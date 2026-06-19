@@ -132,9 +132,22 @@ pub async fn drive(task_id: String) -> anyhow::Result<()> {
     }
 
     let result = aggregate::aggregate(&parts);
-    let c = storage::open_conn()?;
-    storage::set_task_result(&c, &task_id, &result)?;
-    storage::set_task_state(&c, &task_id, TaskState::Aggregated)?;
+    {
+        let c = storage::open_conn()?;
+        storage::set_task_result(&c, &task_id, &result)?;
+        storage::set_task_state(&c, &task_id, TaskState::Aggregated)?;
+    }
     tracing::info!(task = %task_id, "任务已采纳（Aggregated）");
+
+    // 结算闭环：贡献点分发 → 哈希链账本 → 团队贡献联动（FR-010/011）。
+    let settle = {
+        let c = storage::open_conn()?;
+        storage::settle_task(&c, &task_id, &task.title)?
+    };
+    {
+        let c = storage::open_conn()?;
+        storage::set_task_state(&c, &task_id, TaskState::Settled)?;
+    }
+    tracing::info!(task = %task_id, total = settle.total, nodes = settle.nodes, "任务已结算（Settled）");
     Ok(())
 }
