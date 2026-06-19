@@ -9,7 +9,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use iai_economic::{credit, ledger, market};
@@ -70,6 +70,11 @@ pub fn router() -> Router {
         .route("/api/network", get(network))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/:id", get(task_detail))
+        .route("/api/tasks/:id/log", get(task_log))
+        .route("/api/tasks/compose", post(tasks_compose))
+        .route("/api/roles", get(roles_list).post(roles_add))
+        .route("/api/roles/:id", put(roles_update).delete(roles_delete))
+        .route("/api/repo/check", post(repo_check))
         .route("/api/auth/logout", post(auth_logout))
         .layer(middleware::from_fn(require_auth));
 
@@ -464,6 +469,261 @@ async fn task_detail(Path(id): Path<String>) -> ApiResult {
         m.insert("result".into(), json!(t.result));
     }
     Ok(Json(v))
+}
+
+/* ---------- 阶段 8：角色库 / 仓库检测 / V2 任务创建 / 操作日志 ---------- */
+
+async fn roles_list() -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let roles = storage::list_roles(&conn).map_err(err500)?;
+    let items: Vec<Value> = roles
+        .iter()
+        .map(|r| json!({ "id": r.id, "name": r.name, "prompt": r.prompt, "isCaptain": r.is_captain, "modelFilter": r.model_filter }))
+        .collect();
+    Ok(Json(Value::Array(items)))
+}
+
+#[derive(Deserialize)]
+struct RoleAddReq {
+    name: String,
+    prompt: Option<String>,
+    model_filter: Option<String>,
+}
+
+async fn roles_add(Json(req): Json<RoleAddReq>) -> ApiResult {
+    if req.name.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "角色名不能为空" }))));
+    }
+    let conn = storage::open_conn().map_err(err500)?;
+    let id = storage::add_role(
+        &conn,
+        req.name.trim(),
+        req.prompt.as_deref().unwrap_or(""),
+        req.model_filter.as_deref().unwrap_or("any"),
+    )
+    .map_err(err500)?;
+    Ok(Json(json!({ "ok": true, "id": id })))
+}
+
+#[derive(Deserialize)]
+struct RoleUpdateReq {
+    name: Option<String>,
+    prompt: Option<String>,
+    model_filter: Option<String>,
+}
+
+async fn roles_update(Path(id): Path<i64>, Json(req): Json<RoleUpdateReq>) -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    storage::update_role(&conn, id, req.name.as_deref(), req.prompt.as_deref(), req.model_filter.as_deref())
+        .map_err(err500)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn roles_delete(Path(id): Path<i64>) -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let ok = storage::delete_role(&conn, id).map_err(err500)?;
+    if !ok {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "队长角色不可删除" }))));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct RepoCheckReq {
+    kind: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    host: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    branch: String,
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// 连通性检测：开源用 git ls-remote；内部用 ssh + git（节点本机 ssh 免密前提）。
+async fn check_repo(req: &RepoCheckReq) -> Result<Vec<String>, String> {
+    use std::time::Duration;
+    use tokio::process::Command;
+    let dur = Duration::from_secs(8);
+    let output = match req.kind.as_str() {
+        "opensource" => {
+            if req.url.trim().is_empty() {
+                return Err("缺少仓库地址".into());
+            }
+            let fut = Command::new("git").args(["ls-remote", "--heads", req.url.trim()]).output();
+            tokio::time::timeout(dur, fut).await
+        }
+        "internal" => {
+            if req.host.trim().is_empty() || req.path.trim().is_empty() {
+                return Err("缺少服务器地址或代码目录".into());
+            }
+            let p = shell_quote(req.path.trim());
+            let remote = format!(
+                "git -C {p} rev-parse --is-inside-work-tree >/dev/null 2>&1 && git -C {p} for-each-ref --format='%(refname:short)' refs/heads"
+            );
+            let fut = Command::new("ssh")
+                .args([
+                    "-o", "StrictHostKeyChecking=no",
+                    "-o", "BatchMode=yes",
+                    "-o", "ConnectTimeout=6",
+                    req.host.trim(),
+                    &remote,
+                ])
+                .output();
+            tokio::time::timeout(dur, fut).await
+        }
+        _ => return Err("未知仓库类型".into()),
+    };
+    let output = output
+        .map_err(|_| "连接超时".to_string())?
+        .map_err(|e| format!("执行失败: {e}"))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("无法连通：{}", err.lines().next().unwrap_or("未知错误（非 git 仓库或不可达）")));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let branches: Vec<String> = if req.kind == "opensource" {
+        stdout
+            .lines()
+            .filter_map(|l| l.split("refs/heads/").nth(1).map(|s| s.trim().to_string()))
+            .collect()
+    } else {
+        stdout.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    };
+    Ok(branches)
+}
+
+async fn repo_check(Json(req): Json<RepoCheckReq>) -> ApiResult {
+    match check_repo(&req).await {
+        Ok(branches) => Ok(Json(json!({ "ok": true, "branches": branches }))),
+        Err(e) => Ok(Json(json!({ "ok": false, "error": e }))),
+    }
+}
+
+fn default_one() -> i64 {
+    1
+}
+fn default_any() -> String {
+    "any".into()
+}
+fn default_private() -> String {
+    "private".into()
+}
+
+#[derive(Deserialize)]
+struct ComposeRepo {
+    kind: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    host: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    branch: String,
+}
+
+#[derive(Deserialize)]
+struct ComposeRole {
+    name: String,
+    #[serde(default)]
+    prompt: String,
+    #[serde(default = "default_one")]
+    recruit_count: i64,
+    #[serde(default = "default_any")]
+    model_filter: String,
+}
+
+#[derive(Deserialize)]
+struct ComposeReq {
+    title: String,
+    repo: ComposeRepo,
+    roles: Vec<ComposeRole>,
+    #[serde(default)]
+    reward: i64,
+    #[serde(default = "default_private")]
+    visibility: String,
+}
+
+/// POST /api/tasks/compose —— V2 任务创建（仓库+多角色+招募+奖金）。
+async fn tasks_compose(Json(req): Json<ComposeReq>) -> ApiResult {
+    if req.title.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "任务标题不能为空" }))));
+    }
+    if req.roles.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "至少配置一个开发角色" }))));
+    }
+    if req.reward < 0 {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "奖励金不能为负" }))));
+    }
+    let conn = storage::open_conn().map_err(err500)?;
+    let self_id = storage::ensure_node(&conn).map_err(err500)?;
+
+    // 奖金校验：不超过本机可用余额
+    if req.reward > 0 {
+        let entries = storage::entries_for(&conn, &self_id).map_err(err500)?;
+        let w = credit::derive_wallet(&entries, storage::now_epoch());
+        if req.reward > w.balance {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("奖励金 {} 超过可用余额 {}", req.reward, w.balance) })),
+            ));
+        }
+    }
+
+    let repo = storage::RepoSpec {
+        kind: req.repo.kind.clone(),
+        url: req.repo.url.clone(),
+        host: req.repo.host.clone(),
+        path: req.repo.path.clone(),
+        branch: req.repo.branch.clone(),
+    };
+    let dev_roles: Vec<storage::TaskRoleSpec> = req
+        .roles
+        .iter()
+        .map(|r| storage::TaskRoleSpec {
+            name: r.name.clone(),
+            prompt: r.prompt.clone(),
+            recruit_count: r.recruit_count.max(1),
+            model_filter: r.model_filter.clone(),
+        })
+        .collect();
+
+    let task_id = storage::create_task_v2(&conn, req.title.trim(), &repo, &dev_roles, req.reward, &req.visibility)
+        .map_err(err500)?;
+
+    // 锁定奖励金（账本 Lock）
+    if req.reward > 0 {
+        storage::append_entry(
+            &conn,
+            ledger::LedgerKind::Lock,
+            &self_id,
+            -req.reward,
+            req.reward,
+            &format!("任务「{}」奖励金锁定", req.title.trim()),
+        )
+        .map_err(err500)?;
+        storage::append_op_log(&conn, &task_id, &self_id, "lock", Some(&format!("锁定奖励金 {}", req.reward)))
+            .map_err(err500)?;
+    }
+
+    Ok(Json(json!({ "ok": true, "taskId": task_id })))
+}
+
+/// GET /api/tasks/:id/log —— 任务操作日志（需求 12）。
+async fn task_log(Path(id): Path<String>) -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let logs = storage::list_op_log(&conn, &id).map_err(err500)?;
+    let items: Vec<Value> = logs
+        .iter()
+        .map(|(ts, actor, action, detail)| json!({ "ts": ts, "actor": actor, "action": action, "detail": detail }))
+        .collect();
+    Ok(Json(Value::Array(items)))
 }
 
 /* ---------- 控制台访问控制 ---------- */

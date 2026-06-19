@@ -213,6 +213,73 @@ fn apply_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.execute("INSERT INTO schema_migrations (version) VALUES (6)", [])?;
     }
 
+    // v7：协作任务市场 V2 —— task 扩展 + 角色库/任务角色/招募槽/操作日志。
+    if applied < 7 {
+        // task 扩展列（逐条 ADD COLUMN；容忍重复以保幂等）。
+        for col in [
+            "repo_kind TEXT NOT NULL DEFAULT 'opensource'",
+            "repo_url TEXT NOT NULL DEFAULT ''",
+            "server_host TEXT NOT NULL DEFAULT ''",
+            "server_path TEXT NOT NULL DEFAULT ''",
+            "branch TEXT NOT NULL DEFAULT ''",
+            "reward_total INTEGER NOT NULL DEFAULT 0",
+            "reward_locked INTEGER NOT NULL DEFAULT 0",
+            "captain_node TEXT NOT NULL DEFAULT ''",
+            "visibility TEXT NOT NULL DEFAULT 'private'",
+            "archived_at TEXT",
+        ] {
+            let _ = conn.execute(&format!("ALTER TABLE task ADD COLUMN {col}"), []);
+        }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS role_template (
+                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                 node_id      TEXT NOT NULL,
+                 name         TEXT NOT NULL,
+                 prompt       TEXT NOT NULL DEFAULT '',
+                 is_captain   INTEGER NOT NULL DEFAULT 0,
+                 model_filter TEXT NOT NULL DEFAULT 'any',
+                 created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             CREATE TABLE IF NOT EXISTS task_role (
+                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                 task_id       TEXT NOT NULL,
+                 name          TEXT NOT NULL,
+                 prompt        TEXT NOT NULL DEFAULT '',
+                 recruit_count INTEGER NOT NULL DEFAULT 1,
+                 model_filter  TEXT NOT NULL DEFAULT 'any',
+                 is_captain    INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS assignment (
+                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                 task_id       TEXT NOT NULL,
+                 task_role_id  INTEGER NOT NULL,
+                 slot_index    INTEGER NOT NULL,
+                 node_id       TEXT,
+                 model         TEXT,
+                 worktree_path TEXT,
+                 status        TEXT NOT NULL DEFAULT 'open',
+                 attempts      INTEGER NOT NULL DEFAULT 0,
+                 tokens        INTEGER NOT NULL DEFAULT 0,
+                 started_at    TEXT,
+                 ended_at      TEXT
+             );
+             CREATE TABLE IF NOT EXISTS op_log (
+                 id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                 task_id TEXT NOT NULL,
+                 ts      TEXT NOT NULL DEFAULT (datetime('now')),
+                 actor   TEXT NOT NULL,
+                 action  TEXT NOT NULL,
+                 detail  TEXT
+             );
+             CREATE INDEX IF NOT EXISTS idx_assignment_task ON assignment(task_id);
+             CREATE INDEX IF NOT EXISTS idx_taskrole_task ON task_role(task_id);
+             CREATE INDEX IF NOT EXISTS idx_oplog_task ON op_log(task_id);
+             CREATE INDEX IF NOT EXISTS idx_roletmpl_node ON role_template(node_id);",
+        )
+        .context("应用迁移 v7 失败")?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (7)", [])?;
+    }
+
     Ok(())
 }
 
@@ -802,4 +869,233 @@ pub fn settle_task(conn: &Connection, task_id: &str, title: &str) -> anyhow::Res
     }
     tx.commit()?;
     Ok(SettleResult { total, nodes: seen.len() as i64 })
+}
+
+/* ---------- 阶段 8：协作任务市场 V2 ---------- */
+
+/// 队长角色默认驱动提示词（需求 3/11）。
+pub const CAPTAIN_PROMPT_DEFAULT: &str = "你是队长节点：负责把任务目标拆解并派发给各角色，\
+收集与审查各角色产出，对照目标不达标则退回对应角色重做，全部达标后汇总归档并分配贡献分。你本身不参与开发。";
+
+/// 角色模板（节点角色库）。
+pub struct RoleTemplate {
+    pub id: i64,
+    pub name: String,
+    pub prompt: String,
+    pub is_captain: bool,
+    pub model_filter: String,
+}
+
+/// 仓库规格（创建任务输入）。
+pub struct RepoSpec {
+    pub kind: String, // 'opensource' | 'internal'
+    pub url: String,
+    pub host: String,
+    pub path: String,
+    pub branch: String,
+}
+
+/// 任务开发角色规格（创建任务输入；队长由后端自动补）。
+pub struct TaskRoleSpec {
+    pub name: String,
+    pub prompt: String,
+    pub recruit_count: i64,
+    pub model_filter: String,
+}
+
+/// 确保本机角色库存在内置「队长」模板（幂等，不可删）。
+pub fn ensure_captain_role(conn: &Connection) -> anyhow::Result<()> {
+    let node_id = ensure_node(conn)?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM role_template WHERE node_id = ?1 AND is_captain = 1",
+        params![node_id],
+        |r| r.get(0),
+    )?;
+    if n == 0 {
+        conn.execute(
+            "INSERT INTO role_template (node_id, name, prompt, is_captain, model_filter)
+             VALUES (?1, '队长', ?2, 1, 'any')",
+            params![node_id, CAPTAIN_PROMPT_DEFAULT],
+        )?;
+    }
+    Ok(())
+}
+
+/// 本机角色库（队长在前）。
+pub fn list_roles(conn: &Connection) -> anyhow::Result<Vec<RoleTemplate>> {
+    ensure_captain_role(conn)?;
+    let node_id = ensure_node(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, prompt, is_captain, model_filter FROM role_template
+         WHERE node_id = ?1 ORDER BY is_captain DESC, id ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![node_id], |r| {
+            Ok(RoleTemplate {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                prompt: r.get(2)?,
+                is_captain: r.get::<_, i64>(3)? != 0,
+                model_filter: r.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 新增非队长角色。返回 id。
+pub fn add_role(conn: &Connection, name: &str, prompt: &str, model_filter: &str) -> anyhow::Result<i64> {
+    let node_id = ensure_node(conn)?;
+    conn.execute(
+        "INSERT INTO role_template (node_id, name, prompt, is_captain, model_filter)
+         VALUES (?1, ?2, ?3, 0, ?4)",
+        params![node_id, name, prompt, model_filter],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// 更新角色（队长仅允许改 prompt）。
+pub fn update_role(
+    conn: &Connection,
+    id: i64,
+    name: Option<&str>,
+    prompt: Option<&str>,
+    model_filter: Option<&str>,
+) -> anyhow::Result<()> {
+    let is_captain: i64 = conn
+        .query_row("SELECT is_captain FROM role_template WHERE id = ?1", params![id], |r| r.get(0))
+        .optional()?
+        .unwrap_or(0);
+    if let Some(p) = prompt {
+        conn.execute("UPDATE role_template SET prompt = ?1 WHERE id = ?2", params![p, id])?;
+    }
+    if is_captain == 0 {
+        if let Some(nm) = name {
+            conn.execute("UPDATE role_template SET name = ?1 WHERE id = ?2", params![nm, id])?;
+        }
+        if let Some(m) = model_filter {
+            conn.execute("UPDATE role_template SET model_filter = ?1 WHERE id = ?2", params![m, id])?;
+        }
+    }
+    Ok(())
+}
+
+/// 删除角色。队长不可删（返回 false）。
+pub fn delete_role(conn: &Connection, id: i64) -> anyhow::Result<bool> {
+    let is_captain: i64 = conn
+        .query_row("SELECT is_captain FROM role_template WHERE id = ?1", params![id], |r| r.get(0))
+        .optional()?
+        .unwrap_or(0);
+    if is_captain == 1 {
+        return Ok(false);
+    }
+    conn.execute("DELETE FROM role_template WHERE id = ?1", params![id])?;
+    Ok(true)
+}
+
+/// 追加一条任务操作日志（需求 12，UTC+8 时间）。
+pub fn append_op_log(
+    conn: &Connection,
+    task_id: &str,
+    actor: &str,
+    action: &str,
+    detail: Option<&str>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO op_log (task_id, ts, actor, action, detail)
+         VALUES (?1, datetime('now','+8 hours'), ?2, ?3, ?4)",
+        params![task_id, actor, action, detail],
+    )?;
+    Ok(())
+}
+
+/// 任务操作日志（时间升序）。
+pub fn list_op_log(conn: &Connection, task_id: &str) -> anyhow::Result<Vec<(String, String, String, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT ts, actor, action, detail FROM op_log WHERE task_id = ?1 ORDER BY id ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![task_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 创建 V2 任务：扩展列 + 队长角色 + 开发角色及招募槽 + 操作日志。返回 task_id。
+/// 奖励金锁定（账本 Lock）由调用方在校验余额后处理。
+pub fn create_task_v2(
+    conn: &Connection,
+    title: &str,
+    repo: &RepoSpec,
+    dev_roles: &[TaskRoleSpec],
+    reward: i64,
+    visibility: &str,
+) -> anyhow::Result<String> {
+    ensure_captain_role(conn)?;
+    let captain_node = ensure_node(conn)?;
+    let captain_prompt: String = conn
+        .query_row(
+            "SELECT prompt FROM role_template WHERE node_id = ?1 AND is_captain = 1 LIMIT 1",
+            params![captain_node],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| CAPTAIN_PROMPT_DEFAULT.to_string());
+
+    let task_id = gen_task_id();
+    let branch = if repo.branch.trim().is_empty() {
+        format!("task/{task_id}")
+    } else {
+        repo.branch.clone()
+    };
+    let repo_display = if repo.kind == "internal" {
+        format!("{}:{}", repo.host, repo.path)
+    } else {
+        repo.url.clone()
+    };
+
+    conn.execute(
+        "INSERT INTO task
+           (task_id, title, repo, prompt, state, repo_kind, repo_url, server_host, server_path,
+            branch, reward_total, reward_locked, captain_node, visibility)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            task_id, title, repo_display, title, "created",
+            repo.kind, repo.url, repo.host, repo.path, branch,
+            reward, reward, captain_node, visibility
+        ],
+    )?;
+
+    // 队长角色（不生成招募槽）
+    conn.execute(
+        "INSERT INTO task_role (task_id, name, prompt, recruit_count, model_filter, is_captain)
+         VALUES (?1, '队长', ?2, 1, 'any', 1)",
+        params![task_id, captain_prompt],
+    )?;
+    // 开发角色 + 招募槽
+    for spec in dev_roles {
+        conn.execute(
+            "INSERT INTO task_role (task_id, name, prompt, recruit_count, model_filter, is_captain)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![task_id, spec.name, spec.prompt, spec.recruit_count.max(1), spec.model_filter],
+        )?;
+        let role_id = conn.last_insert_rowid();
+        for slot in 0..spec.recruit_count.max(1) {
+            conn.execute(
+                "INSERT INTO assignment (task_id, task_role_id, slot_index, status)
+                 VALUES (?1, ?2, ?3, 'open')",
+                params![task_id, role_id, slot],
+            )?;
+        }
+    }
+
+    append_op_log(
+        conn,
+        &task_id,
+        &captain_node,
+        "create",
+        Some(&format!("repo={repo_display} branch={branch} reward={reward} dev_roles={}", dev_roles.len())),
+    )?;
+    Ok(task_id)
 }
