@@ -57,8 +57,36 @@ pub enum Command {
         #[command(subcommand)]
         action: TaskCmd,
     },
+    /// 控制台访问密码：set / status / clear。
+    Password {
+        #[command(subcommand)]
+        action: PasswordCmd,
+    },
+    /// 在线升级：从 GitHub Releases 拉取最新版本并替换当前二进制。
+    Upgrade {
+        #[command(subcommand)]
+        action: UpgradeCmd,
+    },
     /// 打印版本号。
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum UpgradeCmd {
+    /// 仅检查是否有新版本（不下载、不安装）。
+    Check,
+    /// 检查并升级到最新版本（默认行为）。可用 --to 指定目标版本。
+    Run {
+        /// 指定目标版本 tag（如 `v0.5.0`）；省略则用 latest release。
+        #[arg(long)]
+        to: Option<String>,
+        /// 跳过确认提示直接升级。
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// 安装后不自动重启 systemd 服务（默认会自动 restart iai.service）。
+        #[arg(long)]
+        no_restart: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -181,5 +209,30 @@ pub enum ModelCmd {
 #[derive(Subcommand, Debug)]
 pub enum NodeCmd {
     /// 显示本机节点身份与状态。
+    Status,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PasswordCmd {
+    /// 设置或更新控制台访问密码。
+    ///
+    /// 默认交互式（两次输入隐藏密码）；用 `--stdin` 从标准输入读单行密码，
+    /// 适合脚本/自动化场景。密码长度至少 8 位。
+    ///
+    /// 设新密码后会清空一次性明文文件（CONSOLE_PASSWORD.txt）。
+    Set {
+        /// 从 stdin 读取密码（单行；末尾换行会被截断）。
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// 显示初始随机密码（仅当一次性文件 CONSOLE_PASSWORD.txt 还存在时可用）。
+    ///
+    /// 文件被 `iai password set` / `iai password reset` 删除后，本命令会提示需要重置密码。
+    Show,
+    /// 重置密码为新的随机密码（生成新的强密码并清空所有 session）。
+    ///
+    /// 新密码会重新写入一次性明文文件供管理员取走；旧 session 立即失效。
+    Reset,
+    /// 查看当前密码状态（是否设置 + 活跃 session 数 + 一次性文件是否在）。
     Status,
 }

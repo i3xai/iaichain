@@ -3,8 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>IAI Chain · 节点控制台</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
+  <title>IAI Chain · 节点控制台</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="shortcut icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/shared/design-tokens.css">
@@ -58,6 +60,33 @@
   :where(button,[role=button],input,a[href]):focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
   .empty{padding:28px 16px;text-align:center;color:var(--faint);font-size:13px}
   .empty .ic{display:block;font-size:20px;opacity:.55;margin-bottom:8px}
+
+  /* ───────────── 登录闸门（auth.js 控制显示） ───────────── */
+  #authGate{display:none;position:fixed;inset:0;background:radial-gradient(ellipse at top,oklch(19% 0.014 255),oklch(11% 0.01 255));z-index:100;place-items:center;padding:24px}
+  #authGate .gate-card{width:min(420px,100%);background:var(--surface);border:1px solid var(--border-bright);border-radius:16px;padding:30px 28px;box-shadow:0 30px 60px oklch(0% 0 0 / .45)}
+  #authGate .gate-logo{display:flex;align-items:center;gap:11px;font-family:var(--font-display);font-weight:700;font-size:18px;letter-spacing:-.01em;margin-bottom:20px}
+  #authGate .gate-logo svg{width:30px;height:30px;flex:none}
+  #authGate .gate-logo b{font-size:18px}
+  #authGate .gate-logo .zh{color:var(--faint);font-size:12px;font-family:var(--font-mono);padding:2px 7px;border:1px solid var(--border);border-radius:6px;font-weight:500}
+  #authGate h1{font-family:var(--font-display);font-size:22px;font-weight:700;margin-bottom:6px;letter-spacing:-.01em}
+  #authGate p.sub{color:var(--muted);font-size:13.5px;line-height:1.55;margin-bottom:20px}
+  #authGate .pw-row{position:relative;margin-bottom:14px}
+  #authGate .pw-row input{width:100%;font-family:var(--font-mono);font-size:15px;background:var(--bg-deep);border:1px solid var(--border-bright);border-radius:9px;padding:13px 44px 13px 14px;color:var(--fg);outline:none;transition:.13s}
+  #authGate .pw-row input:focus{border-color:var(--accent);box-shadow:0 0 0 3px oklch(80% 0.15 195 / .14)}
+  #authGate .pw-row .toggle{position:absolute;right:10px;top:50%;transform:translateY(-50%);background:transparent;border:0;color:var(--faint);font-size:11px;cursor:pointer;padding:6px 8px;border-radius:6px;font-family:var(--font-mono)}
+  #authGate .pw-row .toggle:hover{color:var(--accent)}
+  #authGate .login-btn{width:100%;background:var(--accent);color:var(--bg-deep);font-family:var(--font-display);font-weight:700;font-size:14px;border:0;border-radius:9px;padding:13px;cursor:pointer;transition:.14s}
+  #authGate .login-btn:hover{filter:brightness(1.08)}
+  #authGate .login-btn:disabled{opacity:.5;cursor:not-allowed}
+  #authGate .login-err{display:none;font-size:12.5px;color:var(--red);background:oklch(68% 0.19 25 / .1);border:1px solid oklch(68% 0.19 25 / .35);border-radius:8px;padding:9px 12px;margin-bottom:12px;line-height:1.5}
+  #authGate .login-err.warn{color:var(--amber);background:oklch(82% 0.14 75 / .1);border-color:oklch(82% 0.14 75 / .35)}
+  #authGate .gate-hint{margin-top:18px;font-family:var(--font-mono);font-size:11.5px;color:var(--faint);line-height:1.7;padding-top:16px;border-top:1px solid var(--border)}
+  #authGate .gate-hint code{background:var(--bg-deep);border:1px solid var(--border);border-radius:5px;padding:1px 6px;color:var(--accent)}
+  #authGate .gate-hint .cpy{display:inline-block;background:transparent;border:1px solid var(--border-bright);color:var(--accent);border-radius:5px;padding:1px 7px;margin-left:6px;cursor:pointer;font-size:10.5px}
+  #authGate .gate-hint .cpy:hover{background:var(--surface-2)}
+  #authGate[data-view="connecting"] .gate-card,#authGate[data-view="expired"] .gate-card{opacity:.97}
+  #authGate[data-view="connecting"] .login-btn{position:relative;color:transparent}
+  #authGate[data-view="connecting"] .login-btn::after{content:"";position:absolute;left:50%;top:50%;width:18px;height:18px;margin:-9px 0 0 -9px;border:2px solid var(--border-bright);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
 
   .scroll{flex:1;overflow-y:auto;padding:24px}
   .view{display:none}.view.on{display:block;animation:fade .3s ease}
@@ -140,7 +169,31 @@
 </style>
 </head>
 <body>
-<div class="app">
+<!-- 登录闸门：未登录或会话过期时由 auth.js 显示 -->
+<div id="authGate" data-view="login">
+  <div class="gate-card">
+    <div class="gate-logo">
+      <svg viewBox="0 0 32 32" fill="none"><rect x="1" y="1" width="30" height="30" rx="8" stroke="var(--accent)" stroke-width="1.5"/><circle cx="9" cy="9" r="2.6" fill="var(--accent)"/><circle cx="23" cy="9" r="2.6" fill="var(--gold)"/><circle cx="16" cy="22" r="2.6" fill="var(--green)"/><path d="M9 9 L23 9 M9 9 L16 22 M23 9 L16 22" stroke="var(--border-bright)" stroke-width="1.3"/></svg>
+      <b>IAI Chain</b><span class="zh">AI链</span>
+    </div>
+    <h1>控制台访问</h1>
+    <p class="sub">本机节点只对持有密码的人开放。首次启动时 iai 已自动生成强随机密码，查看 <code style="font-family:var(--font-mono);font-size:12px;color:var(--accent);background:var(--bg-deep);padding:1px 6px;border-radius:5px">/var/lib/iai/CONSOLE_PASSWORD.txt</code> 或使用 <code style="font-family:var(--font-mono);font-size:12px;color:var(--accent);background:var(--bg-deep);padding:1px 6px;border-radius:5px">iai password show</code>。</p>
+    <form id="loginForm" autocomplete="off">
+      <div class="login-err" id="loginErr" role="alert"></div>
+      <div class="pw-row">
+        <input id="loginPw" type="password" autocomplete="current-password" placeholder="控制台密码" aria-label="控制台密码" />
+        <button type="button" class="toggle" id="loginPwToggle" aria-label="显示密码">显示</button>
+      </div>
+      <button type="submit" class="login-btn" id="loginBtn">解锁控制台</button>
+    </form>
+    <div class="gate-hint">
+      <div>改密码：<code>iai password set</code><span class="cpy" data-copy="iai password set">复制</span></div>
+      <div style="margin-top:5px">忘密码：<code>iai password reset</code><span class="cpy" data-copy="iai password reset">复制</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="app" id="appRoot">
   <!-- SIDEBAR -->
   <aside class="side" id="side">
     <div class="brand">
@@ -166,6 +219,7 @@
       <div class="cmd">⌘K 运行命令…<kbd>iai</kbd></div>
       <div class="wallet"><span class="coin">¥</span><b id="wbal" class="tnum">1,240</b><small>贡献币</small></div>
       <button class="btn btn-pri" data-view="tasks" id="newTask">+ 新建任务</button>
+      <button class="btn btn-ghost" id="logoutBtn" title="注销并回到登录页" style="margin-left:6px">退出</button>
     </div>
 
     <main class="scroll" role="main">
@@ -267,6 +321,6 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
-<script type="module" src="/console/app.js"></script>
+<script type="module" src="/console/auth.js"></script>
 </body>
 </html>

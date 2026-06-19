@@ -25,10 +25,18 @@ pub fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
-/// 数据目录：`$IAI_HOME` 优先，否则 `~/.iai`，再否则当前目录下 `.iai`。
+/// 数据目录解析顺序（与 systemd 部署保持一致）：
+/// 1. `$IAI_HOME`（显式优先）
+/// 2. `/var/lib/iai` —— 仅当 `iai.db` 已存在（系统服务用），CLI 改密码时能命中同一份
+/// 3. `$HOME/.iai` —— 开发/单机
+/// 4. `.iai` —— 当前目录兜底
 pub fn data_dir() -> PathBuf {
     if let Ok(home) = std::env::var("IAI_HOME") {
         return PathBuf::from(home);
+    }
+    let systemd_default = PathBuf::from("/var/lib/iai");
+    if systemd_default.join("iai.db").exists() {
+        return systemd_default;
     }
     if let Ok(home) = std::env::var("HOME") {
         return PathBuf::from(home).join(".iai");
@@ -187,6 +195,22 @@ fn apply_migrations(conn: &Connection) -> anyhow::Result<()> {
         )
         .context("应用迁移 v5 失败")?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (5)", [])?;
+    }
+
+    // v6：控制台访问控制 —— session 表（存 token 哈希 + 过期时间）。
+    // 密码哈希本身存到独立文件 `$IAI_HOME/console_auth.json`（与 DB 隔离，便于独立备份/清除）。
+    if applied < 6 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS auth_sessions (
+                 token_hash TEXT PRIMARY KEY,
+                 expires_at INTEGER NOT NULL,
+                 created_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires
+                 ON auth_sessions(expires_at);",
+        )
+        .context("应用迁移 v6 失败")?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (6)", [])?;
     }
 
     Ok(())

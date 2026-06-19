@@ -8,11 +8,14 @@ mod embed;
 mod orchestrator;
 mod storage;
 mod api;
+mod auth;
+mod upgrade;
 
 use clap::Parser;
-use cli::{Cli, Command, LedgerCmd, MarketCmd, ModelCmd, NodeCmd, TaskCmd, TeamCmd};
+use cli::{Cli, Command, LedgerCmd, MarketCmd, ModelCmd, NodeCmd, PasswordCmd, TaskCmd, TeamCmd, UpgradeCmd};
 use iai_economic::{credit, ledger, ledger::LedgerKind, market};
 use iai_node::{registry, Provider};
+use rusqlite::params;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -34,6 +37,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Team { action } => run_team(action),
         Command::Net => run_net(),
         Command::Task { action } => run_task_cmd(action).await,
+        Command::Password { action } => run_password(action),
+        Command::Upgrade { action } => run_upgrade(action).await,
         Command::Version => {
             println!("iai-chain {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -234,6 +239,84 @@ fn run_net() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_password(action: PasswordCmd) -> anyhow::Result<()> {
+    match action {
+        PasswordCmd::Set { stdin } => {
+            let plain = if stdin {
+                use std::io::Read;
+                let mut s = String::new();
+                std::io::stdin().read_to_string(&mut s)?;
+                s.trim_end_matches(['\n', '\r']).to_string()
+            } else {
+                let p1 = rpassword::prompt_password("新密码（≥8 位，输入隐藏）: ")?;
+                if p1.len() < 8 {
+                    anyhow::bail!("密码至少 8 位");
+                }
+                let p2 = rpassword::prompt_password("再输一次确认: ")?;
+                if p1 != p2 {
+                    anyhow::bail!("两次输入不一致");
+                }
+                p1
+            };
+            if plain.is_empty() {
+                anyhow::bail!("密码不能为空");
+            }
+            auth::set_password(&plain)?;
+            // 改密码同时清掉所有 session，强制重新登录。
+            let conn = storage::open_conn()?;
+            conn.execute("DELETE FROM auth_sessions", [])?;
+            println!("✓ 控制台密码已更新。旧 session 全部失效，需要重新登录。");
+            println!("  一次性明文文件已删除；下次忘记密码可用 `iai password reset` 重置。");
+        }
+        PasswordCmd::Show => {
+            match auth::read_initial_password() {
+                Some(plain) => {
+                    println!("⚠ 一次性明文文件内容（看完请执行 `iai password reset` 删除）:");
+                    println!("    {plain}");
+                    println!("  文件路径: {}", auth::initial_password_file().display());
+                }
+                None => {
+                    println!("明文密码已不可恢复（一次性文件已被删除或从未生成）。");
+                    println!("提示: 运行 `iai password reset` 生成新的随机密码。");
+                }
+            }
+        }
+        PasswordCmd::Reset => {
+            let new_plain = auth::reset_to_random()?;
+            println!("⚠ 控制台密码已重置为新的随机密码:");
+            println!("    {new_plain}");
+            println!("  已写入一次性明文文件: {}", auth::initial_password_file().display());
+            println!("  请妥善保存并删除该文件（看完后运行 `rm $(iai password status | grep 明文 | awk '{{print $NF}}')` 或手动 rm）。");
+        }
+        PasswordCmd::Status => {
+            let path = auth::password_file();
+            println!("密码哈希    {}", path.display());
+            println!("已设置      {}", if auth::is_password_set() { "是" } else { "否" });
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if let Ok(mtime) = meta.modified() {
+                    if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
+                        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(dur.as_secs() as i64, 0)
+                            .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                            .unwrap_or_default();
+                        println!("最近修改    {dt}");
+                    }
+                }
+            }
+            println!("明文文件    {}", auth::initial_password_file().display());
+            println!("  存在      {}", if auth::has_initial_password_file() { "是（可 `iai password show` 查看）" } else { "否" });
+
+            let conn = storage::open_conn()?;
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM auth_sessions WHERE expires_at > ?",
+                params![storage::now_epoch()],
+                |r| r.get(0),
+            )?;
+            println!("活跃会话    {n}");
+        }
+    }
+    Ok(())
+}
+
 async fn run_task_cmd(action: TaskCmd) -> anyhow::Result<()> {
     match action {
         TaskCmd::Run { repo, prompt } => {
@@ -301,6 +384,32 @@ async fn run_task_cmd(action: TaskCmd) -> anyhow::Result<()> {
                     println!("--- 聚合结果 ---\n{r}");
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+async fn run_upgrade(action: UpgradeCmd) -> anyhow::Result<()> {
+    match action {
+        UpgradeCmd::Check => {
+            let info = upgrade::check().await?;
+            println!("当前版本  v{}", info.current);
+            println!("最新版本  {} (v{})", info.latest_tag, info.latest);
+            if let Some(p) = info.published_at {
+                println!("发布时间  {p}");
+            }
+            println!("目标平台  {}", info.target);
+            println!("资产      {}", info.asset_name);
+            println!("SHA256    {}", if info.has_sha256 { "有" } else { "无（仅 TLS 校验）" });
+            println!();
+            if info.has_update {
+                println!("↑ 有新版本可用 → 运行 `iai upgrade` 或 `iai upgrade --to {}`", info.latest_tag);
+            } else {
+                println!("✓ 已是最新版本");
+            }
+        }
+        UpgradeCmd::Run { to, yes, no_restart } => {
+            upgrade::run(to, yes, no_restart).await?;
         }
     }
     Ok(())

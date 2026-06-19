@@ -5,8 +5,10 @@
 //! 后续阶段在此挂载 `/api/wallet`、`/api/ledger`、`/api/market/*`、`/api/team`、`/api/tasks/*`。
 
 use axum::{
-    extract::Path,
-    http::StatusCode,
+    extract::{Path, Request},
+    http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
@@ -16,11 +18,20 @@ use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::{embed::static_handler, orchestrator, storage};
+use crate::{auth, embed::static_handler, orchestrator, storage};
 
 /// 启动本地服务，仅绑定回环地址。
 pub async fn serve(port: u16) -> anyhow::Result<()> {
     let _conn = storage::init_db()?;
+
+    // 首次启动自动生成强随机密码（不会再出现 password_not_set 状态）。
+    if let Some(plain) = auth::ensure_password_on_first_run()? {
+        tracing::warn!(
+            plain = %plain,
+            file = %auth::initial_password_file().display(),
+            "已自动生成控制台随机密码；明文已写入一次性文件（0600），请妥善保存后删除。"
+        );
+    }
 
     let app = router();
     let addr = format!("127.0.0.1:{port}");
@@ -30,16 +41,21 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
     tracing::info!("  落地页:  http://{addr}/");
     tracing::info!("  控制台:  http://{addr}/console");
     tracing::info!("  健康检查: http://{addr}/api/health");
+    tracing::info!(
+        "  改密码: `iai password set`；忘密码: `iai password reset`；查看初始密码: `iai password show`"
+    );
 
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-/// 组装路由：先匹配 `/api/*`，未命中则回退到内嵌静态资源。
+/// 组装路由：
+/// - 公开：`/api/health`、`/api/version`、`/api/auth/*`
+/// - 受保护：其它所有 `/api/*`（需 Authorization: Bearer <token>）
+/// - 静态资源：落地页 `/`、控制台 `/console` 不保护（前端自己处理登录）
 pub fn router() -> Router {
-    Router::new()
-        .route("/api/health", get(health))
-        .route("/api/version", get(version))
+    // 受保护的 API 路由子树。
+    let protected = Router::new()
         .route("/api/node", get(node))
         .route("/api/node/models", get(list_models).post(add_model))
         .route("/api/wallet", get(wallet))
@@ -54,7 +70,65 @@ pub fn router() -> Router {
         .route("/api/network", get(network))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/:id", get(task_detail))
+        .route("/api/auth/logout", post(auth_logout))
+        .layer(middleware::from_fn(require_auth));
+
+    Router::new()
+        .route("/api/health", get(health))
+        .route("/api/version", get(version))
+        .route("/api/auth/status", get(auth_status))
+        .route("/api/auth/login", post(auth_login))
+        .merge(protected)
         .fallback(static_handler)
+}
+
+/// 鉴权中间件：从 Authorization 头提取 Bearer token，校验通过则放行，
+/// 否则返回 401 + `{ error: "..." }`。
+///
+/// 启动期已保证密码一定存在（首次启动自动生成），所以这里不再处理 password_not_set 分支。
+async fn require_auth(req: Request, next: Next) -> Result<Response, Response> {
+    let token = req
+        .headers()
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string());
+
+    let Some(token) = token else {
+        return Err(unauthorized_response("missing_token", "缺少 Authorization: Bearer <token>"));
+    };
+
+    let conn = match storage::open_conn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "鉴权时打开 DB 失败");
+            return Err(internal_error_response(&e));
+        }
+    };
+
+    if !auth::validate_session(&conn, &token) {
+        return Err(unauthorized_response("invalid_token", "token 无效或已过期，请重新登录"));
+    }
+
+    Ok(next.run(req).await)
+}
+
+fn unauthorized_response(code: &str, message: &str) -> Response {
+    use axum::response::IntoResponse;
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": code, "message": message })),
+    )
+        .into_response()
+}
+
+fn internal_error_response(e: &anyhow::Error) -> Response {
+    use axum::response::IntoResponse;
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "internal", "message": e.to_string() })),
+    )
+        .into_response()
 }
 
 /// 统一错误映射：领域/存储错误 → 500 + JSON。
@@ -390,4 +464,77 @@ async fn task_detail(Path(id): Path<String>) -> ApiResult {
         m.insert("result".into(), json!(t.result));
     }
     Ok(Json(v))
+}
+
+/* ---------- 控制台访问控制 ---------- */
+
+/// GET /api/auth/status —— 是否已设置密码 + 密码文件 mtime（公开）。
+async fn auth_status() -> Json<Value> {
+    Json(json!({
+        "passwordSet": auth::is_password_set(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct LoginReq {
+    /// 明文密码。
+    password: String,
+}
+
+/// POST /api/auth/login —— 校验密码，签发 session token（24h 有效）。
+///
+/// 启动期已保证密码存在；密码错误时返回 401。
+async fn auth_login(Json(req): Json<LoginReq>) -> (StatusCode, Json<Value>) {
+    if !auth::verify_password(&req.password) {
+        // 防爆破：人为加 200ms 抖动（避开 argon2 默认时长的统计差）。
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "invalid_password", "message": "密码错误" })),
+        );
+    }
+    let conn = match storage::open_conn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "登录时打开 DB 失败");
+            return err500(e);
+        }
+    };
+    match auth::create_session(&conn) {
+        Ok((token, expires_at)) => (
+            StatusCode::OK,
+            Json(json!({
+                "token": token,
+                "expiresAt": expires_at,
+                "ttlSeconds": auth::SESSION_TTL_SECS,
+            })),
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "创建 session 失败");
+            err500(e)
+        }
+    }
+}
+
+/// POST /api/auth/logout —— 注销当前 token（受中间件保护，必须带有效 token）。
+async fn auth_logout(headers: HeaderMap) -> (StatusCode, Json<Value>) {
+    let token = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|s| s.trim());
+    let Some(token) = token else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "missing_token" })),
+        );
+    };
+    let conn = match storage::open_conn() {
+        Ok(c) => c,
+        Err(e) => return err500(e),
+    };
+    match auth::delete_session(&conn, token) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(e) => err500(e),
+    }
 }

@@ -6,16 +6,140 @@
  *     假数据（Promise 形式，模拟将来的网络调用）。
  *   - 后续每个阶段，只需把对应函数从「返回假数据」翻转为「fetch 真实端点」，
  *     页面行为不变、数据变真。每个函数上方标注了它将在哪个阶段被翻转。
+ *   - 鉴权：除 `/api/auth/*`、`/api/health`、`/api/version` 外，其它 `/api/*` 都需要
+ *     `Authorization: Bearer <token>`。Token 存 localStorage（`iai.console.token`），
+ *     由 `setToken()` / `clearToken()` 管理；fetch 在收到 401 时触发回调（由
+ *     console 的 auth.js 注册，用于回到登录页）。
  *
  * 约定：所有函数返回 Promise；调用方一律 await。
  */
 
 const BASE = "";
 
+/* ───────────── 鉴权 · token 管理 ───────────── */
+
+const TOKEN_KEY = "iai.console.token";
+const TOKEN_EXP_KEY = "iai.console.tokenExpires";
+const _unauthListeners = new Set();
+
+/** 注册「收到 401」回调（如：清 token + 回到登录页）。返回反注册函数。 */
+export function onUnauthorized(fn) {
+  _unauthListeners.add(fn);
+  return () => _unauthListeners.delete(fn);
+}
+
+function fireUnauthorized(path) {
+  for (const fn of _unauthListeners) {
+    try { fn(path); } catch (_) { /* 监听器异常不影响其它 */ }
+  }
+}
+
+/** 读取 localStorage 中的 token（如存在且未过期则返回，否则返回 null）。 */
+export function getToken() {
+  try {
+    const t = localStorage.getItem(TOKEN_KEY);
+    if (!t) return null;
+    const exp = Number(localStorage.getItem(TOKEN_EXP_KEY) || "0");
+    // 提前 30 秒判过期，避免「正好到期」导致请求才到一半
+    if (exp && exp * 1000 - 30000 < Date.now()) {
+      clearToken();
+      return null;
+    }
+    return t;
+  } catch {
+    return null;
+  }
+}
+
+export function setToken(token, expiresAt) {
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+    if (expiresAt) localStorage.setItem(TOKEN_EXP_KEY, String(expiresAt));
+  } catch { /* localStorage 不可用时静默 */ }
+}
+
+export function clearToken() {
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(TOKEN_EXP_KEY);
+  } catch { /* */ }
+}
+
+export function hasToken() {
+  return getToken() !== null;
+}
+
+function authHeaders() {
+  const t = getToken();
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
+/* ───────────── 统一 fetch ───────────── */
+
+class AuthError extends Error {
+  constructor(path, payload) {
+    super(`401 ${path}` + (payload && payload.message ? ` · ${payload.message}` : ""));
+    this.name = "AuthError";
+    this.path = path;
+    this.payload = payload;
+  }
+}
+
 async function getJSON(path) {
-  const res = await fetch(BASE + path, { headers: { Accept: "application/json" } });
+  const res = await fetch(BASE + path, {
+    headers: { Accept: "application/json", ...authHeaders() },
+  });
+  if (res.status === 401) {
+    const body = await res.json().catch(() => ({}));
+    clearToken();
+    fireUnauthorized(path);
+    throw new AuthError(path, body);
+  }
   if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
   return res.json();
+}
+
+async function postJSON(path, body) {
+  const res = await fetch(BASE + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json", ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) {
+    const payload = await res.json().catch(() => ({}));
+    clearToken();
+    fireUnauthorized(path);
+    throw new AuthError(path, payload);
+  }
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.error || e.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/* ───────────── 鉴权接口（公开） ───────────── */
+
+/** GET /api/auth/status —— 控制台是否启用密码保护（启动时已默认开启）。 */
+export async function getAuthStatus() {
+  try {
+    return await getJSON("/api/auth/status"); // { passwordSet: bool }
+  } catch {
+    return { passwordSet: false };
+  }
+}
+
+/** POST /api/auth/login —— 校验密码、签发 session token。 */
+export async function authLogin(password) {
+  const r = await postJSON("/api/auth/login", { password }); // { token, expiresAt, ttlSeconds }
+  setToken(r.token, r.expiresAt);
+  return r;
+}
+
+/** POST /api/auth/logout —— 注销当前 token（即使后端失败也清本地）。 */
+export async function authLogout() {
+  try { await postJSON("/api/auth/logout", {}); } catch (_) { /* 忽略 */ }
+  clearToken();
 }
 
 /* ───────────── 阶段 0：已对接真实后端 ───────────── */
@@ -62,16 +186,7 @@ export async function getModels() {
 
 /** 新增模型配置：POST /api/node/models { provider, model?, key? }。 */
 export async function addModel(body) {
-  const res = await fetch(BASE + "/api/node/models", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const e = await res.json().catch(() => ({}));
-    throw new Error(e.error || `HTTP ${res.status}`);
-  }
-  return res.json();
+  return postJSON("/api/node/models", body);
 }
 
 /* ───────────── 阶段 4：已对接真实后端（网络 / 团队） ───────────── */
@@ -87,13 +202,7 @@ export async function getNetwork() {
 
 /** 邀请 / 登记成员节点：POST /api/team/invite。 */
 export async function inviteMember(body) {
-  const res = await fetch(BASE + "/api/team/invite", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  return postJSON("/api/team/invite", body);
 }
 
 /* ───────────── 阶段 2：已对接真实后端（钱包 / 账本） ───────────── */
@@ -151,30 +260,12 @@ export async function getPriceSeries(endPx) {
 /** 按最低价买入：POST /api/market/buy，由服务端撮合 + 记账（FR-012）。
  *  返回 { orders（新簿）, filled, cost }。`orders` 形参仅为兼容旧签名，撮合以服务端为准。 */
 export async function buyAtLowest(orders, need) {
-  const res = await fetch(BASE + "/api/market/buy", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ qty: need }),
-  });
-  if (!res.ok) {
-    const e = await res.json().catch(() => ({}));
-    throw new Error(e.error || `HTTP ${res.status}`);
-  }
-  return res.json(); // { orders, filled, cost }
+  return postJSON("/api/market/buy", { qty: need });
 }
 
 /** 挂出卖单：POST /api/market/sell { px, qty, node? }。 */
 export async function sellAsk(body) {
-  const res = await fetch(BASE + "/api/market/sell", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const e = await res.json().catch(() => ({}));
-    throw new Error(e.error || `HTTP ${res.status}`);
-  }
-  return res.json();
+  return postJSON("/api/market/sell", body);
 }
 
 /* ───────────── 阶段 5：已对接真实后端（任务） ───────────── */
@@ -190,16 +281,7 @@ export async function getTasks() {
 
 /** 发起任务：POST /api/tasks { prompt, repo }（服务端解析→分解→匹配→异步执行）。 */
 export async function createTask(prompt, repo) {
-  const res = await fetch(BASE + "/api/tasks", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ prompt, repo }),
-  });
-  if (!res.ok) {
-    const e = await res.json().catch(() => ({}));
-    throw new Error(e.error || `HTTP ${res.status}`);
-  }
-  return res.json();
+  return postJSON("/api/tasks", { prompt, repo });
 }
 
 /** 团队成员节点。返回 [[name, role, model, online01, creditsStr]]。 */

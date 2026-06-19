@@ -1,24 +1,145 @@
-// 节点控制台逻辑（ES module）。数据一律经 ../shared/api.js 接缝层取得。
-import { getMarketBook, getPriceSeries, buyAtLowest, getTasks, createTask, getTeam, getLedger, getVersion, getNode, getWallet, getNetwork } from "/shared/api.js";
+// 节点控制台逻辑（ES module）。数据一律经 /shared/api.js 接缝层取得。
+//
+// 此模块不再自启动：所有顶层 await 与 DOM 初始化都集中在 `init()` 函数里，
+// 由 `auth.js` 在登录成功后再调用——避免未登录用户进入页面时顶层 fetch 触发 401。
+import {
+  getMarketBook, getPriceSeries, buyAtLowest, getTasks, createTask,
+  getTeam, getLedger, getVersion, getNode, getWallet, getNetwork, authLogout,
+} from "/shared/api.js";
 
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-// ---- view nav ----
+// 模块状态（在 init() 中填充）
+var orders = [];
+var tasks = [];
+var team = [];
+var ledger = [];
+var currentFilter = "all";
+var pollTimer = null;
+var inited = false;
+
+export async function init() {
+  if (inited) return;
+  inited = true;
+  bindNav();
+  bindActions();
+  bindLogout();
+
+  // 并行拉首屏数据
+  var got = await Promise.allSettled([
+    getMarketBook(), getTasks(), getTeam(), getLedger(), getVersion(), getNode(), getWallet(), getNetwork(),
+  ]);
+  if (got[0].status === "fulfilled") orders = got[0].value;
+  if (got[1].status === "fulfilled") tasks = got[1].value;
+  if (got[2].status === "fulfilled") team = got[2].value;
+  if (got[3].status === "fulfilled") ledger = got[3].value;
+
+  if (got[4].status === "fulfilled") {
+    var f = document.getElementById("footVer"); if (f) f.textContent = "v" + got[4].value.version;
+  }
+  if (got[5].status === "fulfilled") renderNode(got[5].value);
+  if (got[6].status === "fulfilled") renderWallet(got[6].value);
+  if (got[7].status === "fulfilled") renderNetwork(got[7].value);
+
+  // 渲染
+  renderAsk();
+  renderTasks(currentFilter);
+  renderOverviewTasks();
+  renderTeam();
+  renderLedger();
+  ensurePolling();
+  lineChart("#ov-spark", 56, false);
+}
+
+/* ───────────── nav + actions ───────────── */
+
+function bindNav() {
+  document.addEventListener("click", function (e) {
+    var t = e.target.closest("[data-view]");
+    if (t) show(t.dataset.view);
+  });
+  var menuBtn = document.getElementById("menuBtn");
+  if (menuBtn) {
+    menuBtn.addEventListener("click", function () {
+      var open = document.getElementById("side").classList.toggle("open");
+      menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+  }
+  document.querySelectorAll("[data-view]").forEach(function (el) {
+    if (el.tagName !== "BUTTON") { el.setAttribute("role", "button"); el.setAttribute("tabindex", "0"); }
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    var t = e.target.closest("[data-view]");
+    if (t && t.tagName !== "BUTTON") { e.preventDefault(); show(t.dataset.view); }
+  });
+}
+
 function show(v) {
   document.querySelectorAll(".view").forEach(function (s) { s.classList.toggle("on", s.dataset.view === v); });
-  document.querySelectorAll(".nav-item").forEach(function (n) { var on = n.dataset.view === v; n.classList.toggle("on", on); if (on) { n.setAttribute("aria-current", "page"); } else { n.removeAttribute("aria-current"); } });
+  document.querySelectorAll(".nav-item").forEach(function (n) {
+    var on = n.dataset.view === v;
+    n.classList.toggle("on", on);
+    if (on) { n.setAttribute("aria-current", "page"); } else { n.removeAttribute("aria-current"); }
+  });
   document.getElementById("side").classList.remove("open");
   if (v === "market") drawMarket();
 }
-document.addEventListener("click", function (e) { var t = e.target.closest("[data-view]"); if (t) { show(t.dataset.view); } });
-var menuBtn = document.getElementById("menuBtn");
-menuBtn.addEventListener("click", function () { var open = document.getElementById("side").classList.toggle("open"); menuBtn.setAttribute("aria-expanded", open ? "true" : "false"); });
-// keyboard operability for non-native view switchers (nav items + inline links)
-document.querySelectorAll("[data-view]").forEach(function (el) { if (el.tagName !== "BUTTON") { el.setAttribute("role", "button"); el.setAttribute("tabindex", "0"); } });
-document.addEventListener("keydown", function (e) { if (e.key !== "Enter" && e.key !== " ") return; var t = e.target.closest("[data-view]"); if (t && t.tagName !== "BUTTON") { e.preventDefault(); show(t.dataset.view); } });
 
-// ---- order book（数据来自 api.getMarketBook） ----
-var orders = await getMarketBook();
+function bindActions() {
+  document.getElementById("buyQty").addEventListener("input", estimate);
+  document.getElementById("buyBtn").addEventListener("click", async function () {
+    var need = parseInt(document.getElementById("buyQty").value, 10) || 0;
+    var self = this;
+    try {
+      var res = await buyAtLowest(orders, need);
+      orders = res.orders; renderAsk();
+      renderWallet();
+      self.textContent = "成交 " + res.filled + " 币 · ¥" + Number(res.cost).toFixed(2);
+    } catch (e) {
+      self.textContent = "成交失败";
+    }
+    setTimeout(function () { self.textContent = "按最低价买入"; }, 2200);
+  });
+
+  document.getElementById("taskFilter").addEventListener("click", function (e) {
+    var b = e.target.closest("button"); if (!b) return;
+    this.querySelectorAll("button").forEach(function (x) { x.classList.toggle("on", x === b); });
+    currentFilter = b.dataset.f; renderTasks(currentFilter);
+  });
+
+  document.getElementById("taskRunBtn").addEventListener("click", async function () {
+    var prompt = document.getElementById("taskPrompt").value.trim();
+    var repo = document.getElementById("taskRepo").value.trim();
+    var msg = document.getElementById("taskRunMsg");
+    if (!prompt) { msg.style.display = ""; msg.innerHTML = '<span style="color:var(--amber)">请先描述需求</span>'; return; }
+    this.disabled = true;
+    try {
+      await createTask(prompt, repo);
+      document.getElementById("taskPrompt").value = "";
+      msg.style.display = ""; msg.innerHTML = '<b>已发起</b><span>任务已分派给团队节点，执行中…</span>';
+      await refreshTasks();
+      ensurePolling();
+    } catch (e) {
+      msg.style.display = ""; msg.innerHTML = '<span style="color:var(--red)">发起失败：' + e.message + '</span>';
+    }
+    this.disabled = false;
+  });
+}
+
+function bindLogout() {
+  var btn = document.getElementById("logoutBtn");
+  if (!btn) return;
+  btn.addEventListener("click", async function () {
+    btn.disabled = true;
+    await authLogout();
+    // auth.js 监听到 401 也会兜底清 token；这里直接刷新走 auth 流程即可。
+    location.reload();
+  });
+}
+
+/* ───────────── order book ───────────── */
+
 function lowest() { return orders.slice().sort(function (a, b) { return a.px - b.px; })[0]; }
 function renderAsk() {
   var tb = document.getElementById("askBody"); if (!tb) return; tb.innerHTML = "";
@@ -49,25 +170,8 @@ function estimate() {
   else { est.textContent = "预计 ≈ ¥" + cost.toFixed(2) + (n > 0 ? "（仅 " + (need - n) + " 可成交）" : ""); }
   if (btn) btn.disabled = (need <= 0 || avail === 0);
 }
-document.getElementById("buyQty").addEventListener("input", estimate);
-document.getElementById("buyBtn").addEventListener("click", async function () {
-  var need = parseInt(document.getElementById("buyQty").value, 10) || 0;
-  var self = this;
-  try {
-    var res = await buyAtLowest(orders, need);
-    orders = res.orders; renderAsk();
-    renderWallet(); // 服务端已撮合并记账，刷新真实余额与流水
-    self.textContent = "成交 " + res.filled + " 币 · ¥" + Number(res.cost).toFixed(2);
-  } catch (e) {
-    self.textContent = "成交失败";
-  }
-  setTimeout(function () { self.textContent = "按最低价买入"; }, 2200);
-});
 
-// ---- tasks（数据来自 api.getTasks；运行中任务轮询刷新） ----
-var tasks = await getTasks();
-var currentFilter = "all";
-var pollTimer = null;
+/* ───────────── tasks ───────────── */
 
 function roleChip(r) {
   var st = r[1] === "done" ? '<span class="tag done">已采纳</span>' : r[1] === "run" ? '<span class="spin"></span>' : '<span class="qty" style="font-size:11px">排队</span>';
@@ -93,9 +197,7 @@ function renderOverviewTasks() {
   }).join("");
 }
 async function refreshTasks() {
-  tasks = await getTasks();
-  renderTasks(currentFilter);
-  renderOverviewTasks();
+  try { tasks = await getTasks(); renderTasks(currentFilter); renderOverviewTasks(); } catch (_) {}
 }
 function ensurePolling() {
   var hasRun = tasks.some(function (t) { return t.st === "run"; });
@@ -106,27 +208,9 @@ function ensurePolling() {
     }, 2000);
   }
 }
-document.getElementById("taskFilter").addEventListener("click", function (e) { var b = e.target.closest("button"); if (!b) return; this.querySelectorAll("button").forEach(function (x) { x.classList.toggle("on", x === b); }); currentFilter = b.dataset.f; renderTasks(currentFilter); });
-document.getElementById("taskRunBtn").addEventListener("click", async function () {
-  var prompt = document.getElementById("taskPrompt").value.trim();
-  var repo = document.getElementById("taskRepo").value.trim();
-  var msg = document.getElementById("taskRunMsg");
-  if (!prompt) { msg.style.display = ""; msg.innerHTML = '<span style="color:var(--amber)">请先描述需求</span>'; return; }
-  this.disabled = true;
-  try {
-    await createTask(prompt, repo);
-    document.getElementById("taskPrompt").value = "";
-    msg.style.display = ""; msg.innerHTML = '<b>已发起</b><span>任务已分派给团队节点，执行中…</span>';
-    await refreshTasks();
-    ensurePolling();
-  } catch (e) {
-    msg.style.display = ""; msg.innerHTML = '<span style="color:var(--red)">发起失败：' + e.message + '</span>';
-  }
-  this.disabled = false;
-});
 
-// ---- team（数据来自 api.getTeam） ----
-var team = await getTeam();
+/* ───────────── team ───────────── */
+
 function renderTeam() {
   var tb = document.getElementById("teamBody"); tb.innerHTML = "";
   team.forEach(function (m) {
@@ -135,8 +219,8 @@ function renderTeam() {
   });
 }
 
-// ---- ledger（数据来自 api.getLedger） ----
-var ledger = await getLedger();
+/* ───────────── ledger ───────────── */
+
 function renderLedger() {
   var tb = document.getElementById("ledgerBody"); if (!tb) return; tb.innerHTML = "";
   ledger.forEach(function (l) {
@@ -145,7 +229,8 @@ function renderLedger() {
   });
 }
 
-// ---- charts（价格序列来自 api.getPriceSeries） ----
+/* ───────────── charts ───────────── */
+
 async function lineChart(sel, h, withArea) {
   if (typeof d3 === "undefined") return;
   var svg = d3.select(sel); if (svg.empty()) return;
@@ -169,64 +254,44 @@ async function lineChart(sel, h, withArea) {
 }
 function drawMarket() { lineChart("#mk-chart", 150, true); }
 
-// ---- footer version（已对接真实后端 /api/version） ----
-(async function () {
-  try { var v = await getVersion(); var f = document.getElementById("footVer"); if (f) f.textContent = "v" + v.version; } catch (e) { /* 离线兜底保留默认 */ }
-})();
+/* ───────────── node / wallet / network ───────────── */
 
-// ---- 本机节点（已对接真实后端 /api/node） ----
 function setPill(id, online, text) {
   var el = document.getElementById(id); if (!el) return;
   el.className = online ? "pill online" : "pill";
   el.innerHTML = '<span class="dot"></span>' + text;
 }
-(async function renderNode() {
-  try {
-    var n = await getNode();
-    var role = n.role || "队长";
-    var models = n.models || [];
-    var setTxt = function (id, t) { var el = document.getElementById(id); if (el) el.textContent = t; };
-    setTxt("barRole", role);
-    setTxt("barNodeId", n.id);
-    setTxt("footNode", n.id);
-    setTxt("nodeLoad", n.load);
-    var meter = document.getElementById("nodeMeter"); if (meter) meter.style.width = (n.load || 0) + "%";
-    setTxt("nodeModels", (models.length ? "模型 " + models.join(" · ") : "未配置模型（iai model add …）") + "｜角色：" + role);
-    setPill("barPill", n.online, n.online ? (n.modelConfigured ? "在线 · 模型已配置" : "在线 · 未配置模型") : "离线");
-    setPill("nodePill", n.online, n.online ? "在线" : "离线");
-  } catch (e) { /* 离线兜底：保留页面默认占位 */ }
-})();
-
-// ---- 钱包（已对接真实后端 /api/wallet，余额/锁定/本周由账本推导） ----
-async function renderWallet() {
-  try {
-    var w = await getWallet();
-    var fmt = function (n) { return Number(n).toLocaleString(); };
-    var setTxt = function (id, t) { var el = document.getElementById(id); if (el) el.textContent = t; };
-    var setHtml = function (id, h) { var el = document.getElementById(id); if (el) el.innerHTML = h; };
-    setTxt("wbal", fmt(w.balance));
-    setTxt("ovWalletBal", fmt(w.balance));
-    setHtml("ovWalletSub", '本周 <span style="color:var(--green)">+' + w.weekly + '</span> · 已锁定 ' + w.locked + '（任务中）');
-    setTxt("walBal", fmt(w.balance));
-    setTxt("walLocked", fmt(w.locked));
-    setTxt("walLockedSub", w.lockedTasks + " 个进行中任务");
-    setTxt("walWeekly", "+" + w.weekly);
-    setTxt("walWeeklySub", w.weeklyAccepted + " 笔被采纳的提交");
-  } catch (e) { /* 离线兜底：保留页面默认占位 */ }
+function renderNode(n) {
+  var role = n.role || "队长";
+  var models = n.models || [];
+  var setTxt = function (id, t) { var el = document.getElementById(id); if (el) el.textContent = t; };
+  setTxt("barRole", role);
+  setTxt("barNodeId", n.id);
+  setTxt("footNode", n.id);
+  setTxt("nodeLoad", n.load);
+  var meter = document.getElementById("nodeMeter"); if (meter) meter.style.width = (n.load || 0) + "%";
+  setTxt("nodeModels", (models.length ? "模型 " + models.join(" · ") : "未配置模型（iai model add …）") + "｜角色：" + role);
+  setPill("barPill", n.online, n.online ? (n.modelConfigured ? "在线 · 模型已配置" : "在线 · 未配置模型") : "离线");
+  setPill("nodePill", n.online, n.online ? "在线" : "离线");
 }
-
-// ---- 网络概况（已对接真实后端 /api/network） ----
-async function renderNetwork() {
-  try {
-    var s = await getNetwork();
-    var setTxt = function (id, t) { var el = document.getElementById(id); if (el) el.textContent = t; };
-    setTxt("netMembers", s.membersOnline);
-    setTxt("netDiscovered", s.discovered);
-    setTxt("netTeams", s.publicTeams);
-  } catch (e) { /* 离线兜底：保留默认占位 */ }
+async function renderWallet(w) {
+  if (!w) { try { w = await getWallet(); } catch (_) { return; } }
+  var fmt = function (n) { return Number(n).toLocaleString(); };
+  var setTxt = function (id, t) { var el = document.getElementById(id); if (el) el.textContent = t; };
+  var setHtml = function (id, h) { var el = document.getElementById(id); if (el) el.innerHTML = h; };
+  setTxt("wbal", fmt(w.balance));
+  setTxt("ovWalletBal", fmt(w.balance));
+  setHtml("ovWalletSub", '本周 <span style="color:var(--green)">+' + w.weekly + '</span> · 已锁定 ' + w.locked + '（任务中）');
+  setTxt("walBal", fmt(w.balance));
+  setTxt("walLocked", fmt(w.locked));
+  setTxt("walLockedSub", w.lockedTasks + " 个进行中任务");
+  setTxt("walWeekly", "+" + w.weekly);
+  setTxt("walWeeklySub", w.weeklyAccepted + " 笔被采纳的提交");
 }
-
-// ---- init ----
-renderAsk(); renderTasks(currentFilter); renderOverviewTasks(); renderTeam(); renderLedger(); renderWallet(); renderNetwork(); ensurePolling();
-lineChart("#ov-spark", 56, false);
-window.addEventListener("resize", function () { lineChart("#ov-spark", 56, false); if (document.querySelector(".view[data-view=market]").classList.contains("on")) drawMarket(); });
+async function renderNetwork(s) {
+  if (!s) { try { s = await getNetwork(); } catch (_) { return; } }
+  var setTxt = function (id, t) { var el = document.getElementById(id); if (el) el.textContent = t; };
+  setTxt("netMembers", s.membersOnline);
+  setTxt("netDiscovered", s.discovered);
+  setTxt("netTeams", s.publicTeams);
+}
