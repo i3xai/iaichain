@@ -9,7 +9,8 @@ mod storage;
 mod api;
 
 use clap::Parser;
-use cli::{Cli, Command, ModelCmd, NodeCmd};
+use cli::{Cli, Command, LedgerCmd, ModelCmd, NodeCmd};
+use iai_economic::{credit, ledger, ledger::LedgerKind};
 use iai_node::Provider;
 
 #[tokio::main]
@@ -26,6 +27,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve { port } => api::serve(port).await,
         Command::Model { action } => run_model(action),
         Command::Node { action } => run_node(action),
+        Command::Wallet => run_wallet(),
+        Command::Ledger { action } => run_ledger(action),
         Command::Version => {
             println!("iai-chain {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -85,6 +88,63 @@ fn run_node(action: NodeCmd) -> anyhow::Result<()> {
                 "能力      {}",
                 if caps.is_empty() { "—（需先配置模型）".to_string() } else { caps.join(", ") }
             );
+        }
+    }
+    Ok(())
+}
+
+fn run_wallet() -> anyhow::Result<()> {
+    let conn = storage::open_conn()?;
+    let entries = storage::all_entries_asc(&conn)?;
+    let w = credit::derive_wallet(&entries, storage::now_epoch());
+    println!("可用余额  {}", w.balance);
+    println!("任务锁定  {}", w.locked);
+    println!("本周收益  +{}（{} 笔被采纳）", w.weekly, w.weekly_accepted);
+    Ok(())
+}
+
+fn signed(n: i64) -> String {
+    if n >= 0 { format!("+{n}") } else { n.to_string() }
+}
+
+fn run_ledger(action: LedgerCmd) -> anyhow::Result<()> {
+    let conn = storage::open_conn()?;
+    match action {
+        LedgerCmd::List { limit } => {
+            let entries = storage::list_ledger_desc(&conn, limit)?;
+            if entries.is_empty() {
+                println!("（账本为空，用 `iai ledger record …` 记账）");
+            } else {
+                for e in entries {
+                    println!(
+                        "{}  {:<4} {:>7}  {}",
+                        ledger::display_time(e.ts_epoch),
+                        e.kind.display_zh(),
+                        signed(e.amount),
+                        e.note
+                    );
+                }
+            }
+        }
+        LedgerCmd::Verify => {
+            let entries = storage::all_entries_asc(&conn)?;
+            match ledger::verify_chain(&entries) {
+                Ok(()) => println!("✓ 账本链完整 · {} 条记录", entries.len()),
+                Err(e) => {
+                    eprintln!("✗ 校验失败: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        LedgerCmd::Record { kind, amount, locked, note, node } => {
+            let kind = LedgerKind::from_str(&kind)
+                .ok_or_else(|| anyhow::anyhow!("未知账本类型: {kind}（settle/reward/lock/unlock/buy/sell）"))?;
+            let node_id = match node {
+                Some(n) => n,
+                None => storage::ensure_node(&conn)?,
+            };
+            let e = storage::append_entry(&conn, kind, &node_id, amount, locked, &note)?;
+            println!("✓ 已记账 seq={} {} {}", e.seq, e.kind.display_zh(), signed(e.amount));
         }
     }
     Ok(())

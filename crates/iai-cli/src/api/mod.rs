@@ -9,6 +9,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use iai_economic::{credit, ledger};
 use iai_node::Provider;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -39,6 +40,8 @@ pub fn router() -> Router {
         .route("/api/version", get(version))
         .route("/api/node", get(node))
         .route("/api/node/models", get(list_models).post(add_model))
+        .route("/api/wallet", get(wallet))
+        .route("/api/ledger", get(ledger_list))
         .fallback(static_handler)
 }
 
@@ -122,4 +125,43 @@ async fn add_model(Json(req): Json<AddModelReq>) -> ApiResult {
         "ok": true,
         "model": { "provider": saved.provider, "model": saved.model, "label": saved.label }
     })))
+}
+
+/* ---------- 阶段 2：钱包与账本 ---------- */
+
+/// GET /api/wallet —— 由账本推导的钱包视图。
+async fn wallet() -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let entries = storage::all_entries_asc(&conn).map_err(err500)?;
+    let w = credit::derive_wallet(&entries, storage::now_epoch());
+    Ok(Json(json!({
+        "balance": w.balance,
+        "locked": w.locked,
+        "weekly": w.weekly,
+        "lockedTasks": w.locked_tasks,
+        "weeklyAccepted": w.weekly_accepted,
+    })))
+}
+
+/// GET /api/ledger —— 最近账本流水（最新在前），直接返回数组。
+async fn ledger_list() -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let entries = storage::list_ledger_desc(&conn, 50).map_err(err500)?;
+    let items: Vec<Value> = entries
+        .iter()
+        .map(|e| {
+            let delta = if e.amount >= 0 {
+                format!("+{}", e.amount)
+            } else {
+                e.amount.to_string()
+            };
+            json!({
+                "time": ledger::display_time(e.ts_epoch),
+                "type": e.kind.display_zh(),
+                "note": e.note,
+                "delta": delta,
+            })
+        })
+        .collect();
+    Ok(Json(Value::Array(items)))
 }

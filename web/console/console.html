@@ -184,8 +184,8 @@
             <div class="stat-sub">P2P 已发现 <span class="mono">23</span> 个节点 · <span class="mono">3</span> 个公开团队</div>
           </div>
           <div class="card"><h3>钱包</h3>
-            <div class="stat g tnum">1,240</div>
-            <div class="stat-sub">本周 <span style="color:var(--green)">+320</span> · 已锁定 80（任务中）</div>
+            <div class="stat g tnum" id="ovWalletBal">0</div>
+            <div class="stat-sub" id="ovWalletSub">读取中…</div>
           </div>
         </div>
 
@@ -248,9 +248,9 @@
       <section class="view" data-view="wallet">
         <div class="view-head"><div><h1>钱包</h1><p>贡献者赚币，需求方花币驱动任务。</p></div></div>
         <div class="grid g-3" style="margin-bottom:16px">
-          <div class="card"><h3>可用余额</h3><div class="stat g tnum">1,240</div><div class="stat-sub">贡献币</div></div>
-          <div class="card"><h3>任务中锁定</h3><div class="stat tnum" style="color:var(--amber)">80</div><div class="stat-sub">2 个进行中任务</div></div>
-          <div class="card"><h3>本周收益</h3><div class="stat gr tnum">+320</div><div class="stat-sub">3 笔被采纳的提交</div></div>
+          <div class="card"><h3>可用余额</h3><div class="stat g tnum" id="walBal">0</div><div class="stat-sub">贡献币</div></div>
+          <div class="card"><h3>任务中锁定</h3><div class="stat tnum" style="color:var(--amber)" id="walLocked">0</div><div class="stat-sub" id="walLockedSub">0 个进行中任务</div></div>
+          <div class="card"><h3>本周收益</h3><div class="stat gr tnum" id="walWeekly">+0</div><div class="stat-sub" id="walWeeklySub">0 笔被采纳的提交</div></div>
         </div>
         <div class="card deep"><h3>近期流水</h3>
           <table><thead><tr><th>时间</th><th>类型</th><th>说明</th><th style="text-align:right">变动</th></tr></thead><tbody id="ledgerBody"></tbody></table>

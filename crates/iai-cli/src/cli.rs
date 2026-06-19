@@ -33,8 +33,47 @@ pub enum Command {
         #[command(subcommand)]
         action: NodeCmd,
     },
+    /// 钱包余额（由账本推导）。
+    Wallet,
+    /// 账本：流水 / 校验 / 记账。
+    Ledger {
+        #[command(subcommand)]
+        action: LedgerCmd,
+    },
     /// 打印版本号。
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LedgerCmd {
+    /// 列出最近账本流水（最新在前）。
+    List {
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// 重算哈希链，校验完整性（防篡改）。
+    Verify,
+    /// 追加一条账本记录。
+    ///
+    /// 运维 / 演示入口；阶段 3 市场买卖、阶段 5 任务锁定、阶段 6 结算分发
+    /// 将由程序自动调用同一记账接口。
+    Record {
+        /// 类型：settle / reward / lock / unlock / buy / sell。
+        #[arg(long)]
+        kind: String,
+        /// 可用余额变动（带符号，如 +180 / -80）。
+        #[arg(long, allow_hyphen_values = true)]
+        amount: i64,
+        /// 锁定池变动（默认 0）。
+        #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+        locked: i64,
+        /// 备注（流水「说明」列）。
+        #[arg(long, default_value = "")]
+        note: String,
+        /// 关联节点（默认本机节点）。
+        #[arg(long)]
+        node: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

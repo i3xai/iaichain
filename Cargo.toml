@@ -24,6 +24,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # 内部 crate 互引
 iai-core = { path = "crates/iai-core" }

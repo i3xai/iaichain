@@ -1,5 +1,5 @@
 // 节点控制台逻辑（ES module）。数据一律经 ../shared/api.js 接缝层取得。
-import { getMarketBook, getPriceSeries, buyAtLowest, getTasks, getTeam, getLedger, getVersion, getNode } from "/shared/api.js";
+import { getMarketBook, getPriceSeries, buyAtLowest, getTasks, getTeam, getLedger, getVersion, getNode, getWallet } from "/shared/api.js";
 
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -147,7 +147,25 @@ function setPill(id, online, text) {
   } catch (e) { /* 离线兜底：保留页面默认占位 */ }
 })();
 
+// ---- 钱包（已对接真实后端 /api/wallet，余额/锁定/本周由账本推导） ----
+async function renderWallet() {
+  try {
+    var w = await getWallet();
+    var fmt = function (n) { return Number(n).toLocaleString(); };
+    var setTxt = function (id, t) { var el = document.getElementById(id); if (el) el.textContent = t; };
+    var setHtml = function (id, h) { var el = document.getElementById(id); if (el) el.innerHTML = h; };
+    setTxt("wbal", fmt(w.balance));
+    setTxt("ovWalletBal", fmt(w.balance));
+    setHtml("ovWalletSub", '本周 <span style="color:var(--green)">+' + w.weekly + '</span> · 已锁定 ' + w.locked + '（任务中）');
+    setTxt("walBal", fmt(w.balance));
+    setTxt("walLocked", fmt(w.locked));
+    setTxt("walLockedSub", w.lockedTasks + " 个进行中任务");
+    setTxt("walWeekly", "+" + w.weekly);
+    setTxt("walWeeklySub", w.weeklyAccepted + " 笔被采纳的提交");
+  } catch (e) { /* 离线兜底：保留页面默认占位 */ }
+}
+
 // ---- init ----
-renderAsk(); renderTasks("all"); renderTeam(); renderLedger();
+renderAsk(); renderTasks("all"); renderTeam(); renderLedger(); renderWallet();
 lineChart("#ov-spark", 56, false);
 window.addEventListener("resize", function () { lineChart("#ov-spark", 56, false); if (document.querySelector(".view[data-view=market]").classList.contains("on")) drawMarket(); });

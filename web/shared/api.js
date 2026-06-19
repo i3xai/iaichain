@@ -81,21 +81,24 @@ export async function getNetwork() {
   return { membersOnline: 5, discovered: 23, publicTeams: 3 };
 }
 
-/* ───────────── 阶段 2 将翻转：钱包 / 账本 ───────────── */
+/* ───────────── 阶段 2：已对接真实后端（钱包 / 账本） ───────────── */
 
-/** 钱包（阶段 2 翻转为 GET /api/wallet）。 */
+/** 钱包视图。返回 { balance, locked, weekly, lockedTasks, weeklyAccepted }。 */
 export async function getWallet() {
-  return { balance: 1240, locked: 80, weekly: 320, lockedTasks: 2, weeklyAccepted: 3 };
+  try {
+    return await getJSON("/api/wallet");
+  } catch {
+    return { balance: 0, locked: 0, weekly: 0, lockedTasks: 0, weeklyAccepted: 0 };
+  }
 }
 
-/** 账本流水（阶段 2 翻转为 GET /api/ledger）。 */
+/** 账本流水（最新在前）。返回 [{ time, type, note, delta }]。 */
 export async function getLedger() {
-  return [
-    { time: "09:42", type: "结算", note: "JWT 模块提交被采纳", delta: "+180" },
-    { time: "08:15", type: "锁定", note: "限流任务发起", delta: "-80" },
-    { time: "昨日", type: "结算", note: "安装脚本被采纳", delta: "+140" },
-    { time: "前日", type: "买入", note: "市场购入贡献币", delta: "+120" },
-  ];
+  try {
+    return await getJSON("/api/ledger");
+  } catch {
+    return [];
+  }
 }
 
 /* ───────────── 阶段 3 将翻转：市场 ───────────── */
