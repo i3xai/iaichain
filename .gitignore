@@ -1,6 +1,9 @@
 # Rust 构建产物
 /target
 
+# 发布构建产物（由 scripts/publish.sh 生成）
+/dist
+
 # 节点运行时数据（SQLite / 日志）
 .iai*/
 *.log
