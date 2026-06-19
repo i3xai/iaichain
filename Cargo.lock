@@ -511,6 +511,7 @@ name = "iai-core"
 version = "0.4.2"
 dependencies = [
  "anyhow",
+ "iai-node",
  "serde",
  "serde_json",
  "thiserror",

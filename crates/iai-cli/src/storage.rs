@@ -7,6 +7,8 @@
 //! （keyring / 加密）列入 `DEVELOPMENT-PLAN.md` 阶段 7，对外 API 一律不回传 key。
 
 use anyhow::Context;
+use iai_core::gen_task_id;
+use iai_core::lifecycle::TaskState;
 use iai_economic::ledger::{self, LedgerEntry, LedgerKind};
 use iai_economic::market::{self, Ask};
 use iai_node::registry::{NetworkStat, TeamMember};
@@ -156,6 +158,35 @@ fn apply_migrations(conn: &Connection) -> anyhow::Result<()> {
         )
         .context("应用迁移 v4 失败")?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (4)", [])?;
+    }
+
+    // v5：任务与子任务。
+    if applied < 5 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS task (
+                 task_id    TEXT PRIMARY KEY,
+                 title      TEXT NOT NULL,
+                 repo       TEXT NOT NULL,
+                 prompt     TEXT NOT NULL,
+                 state      TEXT NOT NULL,
+                 result     TEXT,
+                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             CREATE TABLE IF NOT EXISTS subtask (
+                 subtask_id    TEXT PRIMARY KEY,
+                 task_id       TEXT NOT NULL,
+                 seq           INTEGER NOT NULL,
+                 role          TEXT NOT NULL,
+                 assigned_node TEXT,
+                 status        TEXT NOT NULL DEFAULT 'wait',
+                 attempts      INTEGER NOT NULL DEFAULT 0,
+                 content       TEXT,
+                 quality_score REAL,
+                 created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        )
+        .context("应用迁移 v5 失败")?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (5)", [])?;
     }
 
     Ok(())
@@ -536,4 +567,154 @@ pub fn network_stat(conn: &Connection) -> anyhow::Result<NetworkStat> {
     let discovered: i64 = conn.query_row("SELECT COUNT(*) FROM team_member", [], |r| r.get(0))?;
     let public_teams: i64 = conn.query_row("SELECT COUNT(*) FROM team", [], |r| r.get(0))?;
     Ok(NetworkStat { members_online, discovered, public_teams })
+}
+
+/* ---------- 阶段 5：任务与子任务 ---------- */
+
+/// 任务（持久化形态）。
+pub struct TaskRow {
+    pub task_id: String,
+    pub title: String,
+    pub repo: String,
+    pub prompt: String,
+    pub state: TaskState,
+    pub result: Option<String>,
+}
+
+/// 子任务（持久化形态）。
+pub struct SubtaskRow {
+    pub subtask_id: String,
+    pub seq: i64,
+    pub role: String,
+    pub assigned_node: Option<String>,
+    pub status: String,
+    pub attempts: i64,
+}
+
+/// 创建任务（初始状态由调用方给定）。返回 task_id。
+pub fn create_task(
+    conn: &Connection,
+    title: &str,
+    repo: &str,
+    prompt: &str,
+    state: TaskState,
+) -> anyhow::Result<String> {
+    let task_id = gen_task_id();
+    conn.execute(
+        "INSERT INTO task (task_id, title, repo, prompt, state) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![task_id, title, repo, prompt, state.as_str()],
+    )?;
+    Ok(task_id)
+}
+
+/// 添加一个子任务（初始状态 wait）。
+pub fn add_subtask(
+    conn: &Connection,
+    task_id: &str,
+    seq: i64,
+    role: &str,
+    assigned_node: Option<&str>,
+) -> anyhow::Result<String> {
+    let subtask_id = format!("{task_id}.{seq}");
+    conn.execute(
+        "INSERT INTO subtask (subtask_id, task_id, seq, role, assigned_node, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'wait')",
+        params![subtask_id, task_id, seq, role, assigned_node],
+    )?;
+    Ok(subtask_id)
+}
+
+pub fn set_task_state(conn: &Connection, task_id: &str, state: TaskState) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE task SET state = ?1 WHERE task_id = ?2",
+        params![state.as_str(), task_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_task_result(conn: &Connection, task_id: &str, result: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE task SET result = ?1 WHERE task_id = ?2",
+        params![result, task_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_subtask_status(conn: &Connection, subtask_id: &str, status: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE subtask SET status = ?1 WHERE subtask_id = ?2",
+        params![status, subtask_id],
+    )?;
+    Ok(())
+}
+
+/// 结束一个子任务：写状态/内容/裁判分/重试次数。
+pub fn finish_subtask(
+    conn: &Connection,
+    subtask_id: &str,
+    status: &str,
+    content: &str,
+    quality_score: f64,
+    attempts: i64,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE subtask SET status = ?1, content = ?2, quality_score = ?3, attempts = ?4
+         WHERE subtask_id = ?5",
+        params![status, content, quality_score, attempts, subtask_id],
+    )?;
+    Ok(())
+}
+
+fn map_task(r: &Row) -> rusqlite::Result<TaskRow> {
+    Ok(TaskRow {
+        task_id: r.get(0)?,
+        title: r.get(1)?,
+        repo: r.get(2)?,
+        prompt: r.get(3)?,
+        state: TaskState::from_str(&r.get::<_, String>(4)?),
+        result: r.get(5)?,
+    })
+}
+
+pub fn get_task(conn: &Connection, task_id: &str) -> anyhow::Result<Option<TaskRow>> {
+    let row = conn
+        .query_row(
+            "SELECT task_id, title, repo, prompt, state, result FROM task WHERE task_id = ?1",
+            params![task_id],
+            map_task,
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// 任务列表（最新创建在前）。
+pub fn list_tasks(conn: &Connection) -> anyhow::Result<Vec<TaskRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT task_id, title, repo, prompt, state, result FROM task ORDER BY created_at DESC, rowid DESC",
+    )?;
+    let rows = stmt.query_map([], map_task)?.collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn map_subtask(r: &Row) -> rusqlite::Result<SubtaskRow> {
+    Ok(SubtaskRow {
+        subtask_id: r.get(0)?,
+        seq: r.get(1)?,
+        role: r.get(2)?,
+        assigned_node: r.get(3)?,
+        status: r.get(4)?,
+        attempts: r.get(5)?,
+    })
+}
+
+/// 某任务的子任务（按 seq 升序）。
+pub fn list_subtasks(conn: &Connection, task_id: &str) -> anyhow::Result<Vec<SubtaskRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT subtask_id, seq, role, assigned_node, status, attempts FROM subtask
+         WHERE task_id = ?1 ORDER BY seq ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![task_id], map_subtask)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }

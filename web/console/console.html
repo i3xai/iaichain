@@ -192,9 +192,7 @@
         <div class="grid g-21">
           <div class="card">
             <h3>当前任务 <a class="mono" style="color:var(--accent);cursor:pointer" data-view="tasks">全部 →</a></h3>
-            <div class="kv"><span class="k">实现 Rust JWT 鉴权模块</span><span class="v"><span class="tag run">运行中 75%</span></span></div>
-            <div class="kv"><span class="k">限流中间件 + 单元测试</span><span class="v"><span class="tag run">运行中 40%</span></span></div>
-            <div class="kv"><span class="k">CLI 安装脚本跨平台适配</span><span class="v"><span class="tag done">已采纳</span></span></div>
+            <div id="ovTasks"></div>
           </div>
           <div class="card deep">
             <h3>贡献币 · 最低挂单 <a class="mono" style="color:var(--accent);cursor:pointer" data-view="market">市场 →</a></h3>
@@ -207,6 +205,14 @@
       <!-- TASKS -->
       <section class="view" data-view="tasks">
         <div class="view-head"><div><h1>任务</h1><p>按提示词分派给不同角色的成员节点，由各节点大模型协同完成。</p></div><div class="filter" id="taskFilter"><button class="on" data-f="all">全部</button><button data-f="run">运行中</button><button data-f="done">已采纳</button></div></div>
+        <div class="card" style="margin-bottom:16px">
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+            <input id="taskPrompt" class="qty-in" style="flex:2;min-width:240px;width:auto" placeholder="描述需求，如：实现一个 Rust 限流中间件">
+            <input id="taskRepo" class="qty-in mono" style="flex:1;min-width:200px;width:auto" placeholder="github.com/acme/public-repo" value="github.com/acme/public-repo">
+            <button class="btn btn-pri" id="taskRunBtn">发起任务</button>
+          </div>
+          <div class="notice" id="taskRunMsg" style="display:none"></div>
+        </div>
         <div id="taskList"></div>
       </section>
 

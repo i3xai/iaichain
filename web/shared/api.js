@@ -177,15 +177,29 @@ export async function sellAsk(body) {
   return res.json();
 }
 
-/* ───────────── 阶段 5 将翻转：任务 ───────────── */
+/* ───────────── 阶段 5：已对接真实后端（任务） ───────────── */
 
-/** 任务列表（阶段 5 翻转为 GET /api/tasks + SSE 实时进度）。 */
+/** 任务列表。返回 [{ id, t, repo, st, pct, roles }]。 */
 export async function getTasks() {
-  return [
-    { t: "实现 Rust JWT 鉴权模块", repo: "github.com/acme/auth-lib", st: "run", pct: 75, roles: [["后端", "done"], ["测试", "run"], ["文档", "wait"]] },
-    { t: "API 限流中间件 + 单元测试", repo: "github.com/acme/gateway", st: "run", pct: 40, roles: [["后端", "run"], ["审查", "wait"]] },
-    { t: "CLI 安装脚本跨平台适配", repo: "github.com/iai/installer", st: "done", pct: 100, roles: [["实现", "done"], ["测试", "done"], ["文档", "done"]] },
-  ];
+  try {
+    return await getJSON("/api/tasks");
+  } catch {
+    return [];
+  }
+}
+
+/** 发起任务：POST /api/tasks { prompt, repo }（服务端解析→分解→匹配→异步执行）。 */
+export async function createTask(prompt, repo) {
+  const res = await fetch(BASE + "/api/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ prompt, repo }),
+  });
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.error || `HTTP ${res.status}`);
+  }
+  return res.json();
 }
 
 /** 团队成员节点。返回 [[name, role, model, online01, creditsStr]]。 */

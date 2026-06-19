@@ -52,8 +52,30 @@ pub enum Command {
     },
     /// 网络概况（在线成员 / 已知节点 / 公开团队）。
     Net,
+    /// 任务：发起 / 列表 / 详情。
+    Task {
+        #[command(subcommand)]
+        action: TaskCmd,
+    },
     /// 打印版本号。
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TaskCmd {
+    /// 发起任务：iai task run --repo github.com/acme/x --prompt "实现限流中间件"。
+    Run {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        prompt: String,
+    },
+    /// 任务列表。
+    List,
+    /// 任务详情（含聚合结果）。
+    Status {
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

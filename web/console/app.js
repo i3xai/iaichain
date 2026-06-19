@@ -1,5 +1,5 @@
 // 节点控制台逻辑（ES module）。数据一律经 ../shared/api.js 接缝层取得。
-import { getMarketBook, getPriceSeries, buyAtLowest, getTasks, getTeam, getLedger, getVersion, getNode, getWallet, getNetwork } from "/shared/api.js";
+import { getMarketBook, getPriceSeries, buyAtLowest, getTasks, createTask, getTeam, getLedger, getVersion, getNode, getWallet, getNetwork } from "/shared/api.js";
 
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -64,22 +64,66 @@ document.getElementById("buyBtn").addEventListener("click", async function () {
   setTimeout(function () { self.textContent = "按最低价买入"; }, 2200);
 });
 
-// ---- tasks（数据来自 api.getTasks） ----
+// ---- tasks（数据来自 api.getTasks；运行中任务轮询刷新） ----
 var tasks = await getTasks();
+var currentFilter = "all";
+var pollTimer = null;
+
+function roleChip(r) {
+  var st = r[1] === "done" ? '<span class="tag done">已采纳</span>' : r[1] === "run" ? '<span class="spin"></span>' : '<span class="qty" style="font-size:11px">排队</span>';
+  return '<div class="role-chip"><span class="tag role">' + r[0] + '</span><span class="st">' + st + "</span></div>";
+}
 function renderTasks(f) {
   var box = document.getElementById("taskList"); box.innerHTML = "";
   var list = tasks.filter(function (t) { return f === "all" || t.st === f; });
   if (list.length === 0) { box.innerHTML = '<div class="empty"><span class="ic">▤</span>该筛选下暂无任务</div>'; return; }
   list.forEach(function (t) {
-    var roles = t.roles.map(function (r) {
-      var st = r[1] === "done" ? '<span class="tag done">已采纳</span>' : r[1] === "run" ? '<span class="spin"></span>' : '<span class="qty" style="font-size:11px">排队</span>';
-      return '<div class="role-chip"><span class="tag role">' + r[0] + '</span><span class="st">' + st + "</span></div>";
-    }).join("");
+    var roles = t.roles.map(roleChip).join("");
     var badge = t.st === "done" ? '<span class="tag done">已采纳 · 发起方获得功能</span>' : '<span class="tag run">运行中 ' + t.pct + "%</span>";
     box.innerHTML += '<div class="task"><div class="top"><span class="ttl">' + t.t + "</span>" + badge + '<span class="repo">' + t.repo + ' (public)</span></div><div class="roles">' + roles + "</div></div>";
   });
 }
-document.getElementById("taskFilter").addEventListener("click", function (e) { var b = e.target.closest("button"); if (!b) return; this.querySelectorAll("button").forEach(function (x) { x.classList.toggle("on", x === b); }); renderTasks(b.dataset.f); });
+function renderOverviewTasks() {
+  var box = document.getElementById("ovTasks"); if (!box) return;
+  var top = tasks.slice(0, 3);
+  if (top.length === 0) { box.innerHTML = '<div class="empty" style="padding:14px 0">暂无任务 · 去任务页发起</div>'; return; }
+  box.innerHTML = top.map(function (t) {
+    var badge = t.st === "done" ? '<span class="tag done">已采纳</span>' : '<span class="tag run">运行中 ' + t.pct + '%</span>';
+    return '<div class="kv"><span class="k">' + t.t + '</span><span class="v">' + badge + '</span></div>';
+  }).join("");
+}
+async function refreshTasks() {
+  tasks = await getTasks();
+  renderTasks(currentFilter);
+  renderOverviewTasks();
+}
+function ensurePolling() {
+  var hasRun = tasks.some(function (t) { return t.st === "run"; });
+  if (hasRun && !pollTimer) {
+    pollTimer = setInterval(async function () {
+      await refreshTasks();
+      if (!tasks.some(function (t) { return t.st === "run"; })) { clearInterval(pollTimer); pollTimer = null; }
+    }, 2000);
+  }
+}
+document.getElementById("taskFilter").addEventListener("click", function (e) { var b = e.target.closest("button"); if (!b) return; this.querySelectorAll("button").forEach(function (x) { x.classList.toggle("on", x === b); }); currentFilter = b.dataset.f; renderTasks(currentFilter); });
+document.getElementById("taskRunBtn").addEventListener("click", async function () {
+  var prompt = document.getElementById("taskPrompt").value.trim();
+  var repo = document.getElementById("taskRepo").value.trim();
+  var msg = document.getElementById("taskRunMsg");
+  if (!prompt) { msg.style.display = ""; msg.innerHTML = '<span style="color:var(--amber)">请先描述需求</span>'; return; }
+  this.disabled = true;
+  try {
+    await createTask(prompt, repo);
+    document.getElementById("taskPrompt").value = "";
+    msg.style.display = ""; msg.innerHTML = '<b>已发起</b><span>任务已分派给团队节点，执行中…</span>';
+    await refreshTasks();
+    ensurePolling();
+  } catch (e) {
+    msg.style.display = ""; msg.innerHTML = '<span style="color:var(--red)">发起失败：' + e.message + '</span>';
+  }
+  this.disabled = false;
+});
 
 // ---- team（数据来自 api.getTeam） ----
 var team = await getTeam();
@@ -183,6 +227,6 @@ async function renderNetwork() {
 }
 
 // ---- init ----
-renderAsk(); renderTasks("all"); renderTeam(); renderLedger(); renderWallet(); renderNetwork();
+renderAsk(); renderTasks(currentFilter); renderOverviewTasks(); renderTeam(); renderLedger(); renderWallet(); renderNetwork(); ensurePolling();
 lineChart("#ov-spark", 56, false);
 window.addEventListener("resize", function () { lineChart("#ov-spark", 56, false); if (document.querySelector(".view[data-view=market]").classList.contains("on")) drawMarket(); });

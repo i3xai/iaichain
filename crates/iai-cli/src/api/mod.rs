@@ -5,16 +5,18 @@
 //! 后续阶段在此挂载 `/api/wallet`、`/api/ledger`、`/api/market/*`、`/api/team`、`/api/tasks/*`。
 
 use axum::{
+    extract::Path,
     http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
 use iai_economic::{credit, ledger, market};
 use iai_node::{registry, Provider};
+use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::{embed::static_handler, storage};
+use crate::{embed::static_handler, orchestrator, storage};
 
 /// 启动本地服务，仅绑定回环地址。
 pub async fn serve(port: u16) -> anyhow::Result<()> {
@@ -50,6 +52,8 @@ pub fn router() -> Router {
         .route("/api/team/recruit", post(team_recruit))
         .route("/api/team/invite", post(team_invite))
         .route("/api/network", get(network))
+        .route("/api/tasks", get(tasks_list).post(tasks_create))
+        .route("/api/tasks/:id", get(task_detail))
         .fallback(static_handler)
 }
 
@@ -316,4 +320,72 @@ async fn team_invite(Json(req): Json<InviteReq>) -> ApiResult {
     )
     .map_err(err500)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/* ---------- 阶段 5：任务编排 ---------- */
+
+/// 把任务 + 子任务组装为前端任务卡所需结构 { id, t, repo, st, pct, roles }。
+fn task_json(conn: &Connection, t: &storage::TaskRow) -> anyhow::Result<Value> {
+    let subs = storage::list_subtasks(conn, &t.task_id)?;
+    let total = subs.len().max(1);
+    let done = subs.iter().filter(|s| s.status == "done").count();
+    let pct = if t.state.is_delivered() { 100 } else { done * 100 / total };
+    let st = if t.state.is_delivered() { "done" } else { "run" };
+    let roles: Vec<Value> = subs
+        .iter()
+        .map(|s| {
+            let status = match s.status.as_str() {
+                "done" => "done",
+                "run" => "run",
+                _ => "wait",
+            };
+            json!([s.role, status])
+        })
+        .collect();
+    Ok(json!({ "id": t.task_id, "t": t.title, "repo": t.repo, "st": st, "pct": pct, "roles": roles }))
+}
+
+/// GET /api/tasks —— 任务列表（最新在前）。
+async fn tasks_list() -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let tasks = storage::list_tasks(&conn).map_err(err500)?;
+    let mut arr = Vec::with_capacity(tasks.len());
+    for t in &tasks {
+        arr.push(task_json(&conn, t).map_err(err500)?);
+    }
+    Ok(Json(Value::Array(arr)))
+}
+
+#[derive(Deserialize)]
+struct CreateTaskReq {
+    prompt: String,
+    repo: String,
+}
+
+/// POST /api/tasks —— 发起任务：解析→分解→匹配（同步），随后异步驱动执行。
+async fn tasks_create(Json(req): Json<CreateTaskReq>) -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let task_id = orchestrator::create_task(&conn, &req.prompt, &req.repo)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))))?;
+    let id = task_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = orchestrator::drive(id).await {
+            tracing::error!(error = %e, "任务驱动失败");
+        }
+    });
+    Ok(Json(json!({ "ok": true, "taskId": task_id })))
+}
+
+/// GET /api/tasks/:id —— 任务详情（含状态/聚合结果）。
+async fn task_detail(Path(id): Path<String>) -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let Some(t) = storage::get_task(&conn, &id).map_err(err500)? else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "任务不存在" }))));
+    };
+    let mut v = task_json(&conn, &t).map_err(err500)?;
+    if let Value::Object(ref mut m) = v {
+        m.insert("state".into(), json!(t.state.display_zh()));
+        m.insert("result".into(), json!(t.result));
+    }
+    Ok(Json(v))
 }

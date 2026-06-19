@@ -5,11 +5,12 @@
 
 mod cli;
 mod embed;
+mod orchestrator;
 mod storage;
 mod api;
 
 use clap::Parser;
-use cli::{Cli, Command, LedgerCmd, MarketCmd, ModelCmd, NodeCmd, TeamCmd};
+use cli::{Cli, Command, LedgerCmd, MarketCmd, ModelCmd, NodeCmd, TaskCmd, TeamCmd};
 use iai_economic::{credit, ledger, ledger::LedgerKind, market};
 use iai_node::{registry, Provider};
 
@@ -32,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Market { action } => run_market(action),
         Command::Team { action } => run_team(action),
         Command::Net => run_net(),
+        Command::Task { action } => run_task_cmd(action).await,
         Command::Version => {
             println!("iai-chain {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -227,5 +229,75 @@ fn run_net() -> anyhow::Result<()> {
     println!("在线成员  {}", s.members_online);
     println!("已知节点  {}", s.discovered);
     println!("公开团队  {}", s.public_teams);
+    Ok(())
+}
+
+async fn run_task_cmd(action: TaskCmd) -> anyhow::Result<()> {
+    match action {
+        TaskCmd::Run { repo, prompt } => {
+            let task_id = {
+                let conn = storage::open_conn()?;
+                orchestrator::create_task(&conn, &prompt, &repo)?
+            };
+            println!("✓ 任务 {task_id} 已创建并分派，执行中…");
+            orchestrator::drive(task_id.clone()).await?;
+            let conn = storage::open_conn()?;
+            if let Some(t) = storage::get_task(&conn, &task_id)? {
+                println!("状态 {}", t.state.display_zh());
+                for s in storage::list_subtasks(&conn, &task_id)? {
+                    println!(
+                        "  {:<6} [{}] {}",
+                        s.role,
+                        s.status,
+                        s.assigned_node.unwrap_or_else(|| "-".into())
+                    );
+                }
+            }
+        }
+        TaskCmd::List => {
+            let conn = storage::open_conn()?;
+            let tasks = storage::list_tasks(&conn)?;
+            if tasks.is_empty() {
+                println!("（暂无任务，用 `iai task run --repo … --prompt …` 发起）");
+            }
+            for t in tasks {
+                let subs = storage::list_subtasks(&conn, &t.task_id)?;
+                let done = subs.iter().filter(|s| s.status == "done").count();
+                println!(
+                    "{}  {:<6} {}/{} 子任务  {}",
+                    t.task_id,
+                    t.state.display_zh(),
+                    done,
+                    subs.len(),
+                    t.title
+                );
+            }
+        }
+        TaskCmd::Status { id } => {
+            let conn = storage::open_conn()?;
+            let t = match storage::get_task(&conn, &id)? {
+                Some(t) => t,
+                None => {
+                    println!("任务不存在: {id}");
+                    return Ok(());
+                }
+            };
+            println!("任务 {}  状态 {}", t.task_id, t.state.display_zh());
+            println!("仓库 {}", t.repo);
+            for s in storage::list_subtasks(&conn, &id)? {
+                println!(
+                    "  {:<6} [{}] {}",
+                    s.role,
+                    s.status,
+                    s.assigned_node.unwrap_or_else(|| "-".into())
+                );
+            }
+            if let Some(r) = t.result {
+                if !r.is_empty() {
+                    println!("--- 聚合结果 ---\n{r}");
+                }
+            }
+        }
+    }
     Ok(())
 }
