@@ -5,6 +5,7 @@
 import {
   getMarketBook, getPriceSeries, buyAtLowest, getTasks, createTask,
   getTeam, getLedger, getVersion, getNode, getWallet, getNetwork, authLogout,
+  checkRepo, composeTask,
 } from "/shared/api.js";
 
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -49,6 +50,107 @@ export async function init() {
   renderLedger();
   ensurePolling();
   lineChart("#ov-spark", 56, false);
+  bindTaskModal();
+}
+
+/* ───────────── 任务创建弹框（阶段 8） ───────────── */
+
+function bindTaskModal() {
+  var modal = document.getElementById("taskModal");
+  if (!modal) return;
+  var $ = function (id) { return document.getElementById(id); };
+  var repoChecked = false, repoKind = "opensource", vis = "network", balance = 0;
+
+  function setMsg(t, cls) { var m = $("tmMsg"); m.textContent = t || ""; m.className = "modal-msg" + (cls ? " " + cls : ""); }
+  function setChk(t, cls) { var c = $("tmCheckMsg"); c.textContent = t || ""; c.className = "chk" + (cls ? " " + cls : ""); }
+  function setSeg(id, val, attr) { [].slice.call($(id).children).forEach(function (b) { b.classList.toggle("on", b.getAttribute(attr) === val); }); }
+  function showRepoFields() { $("tmOpensource").hidden = repoKind !== "opensource"; $("tmInternal").hidden = repoKind !== "internal"; }
+
+  function addRoleCard() {
+    var d = document.createElement("div");
+    d.className = "role-card";
+    d.innerHTML =
+      '<div class="rc-top"><input class="rc-name" placeholder="角色名，如 后端"><button type="button" class="rc-del">删除</button></div>' +
+      '<textarea class="rc-prompt" placeholder="该角色负责的事情（提示词）"></textarea>' +
+      '<div class="rc-meta"><label>招募数<input class="rc-count" type="number" min="1" value="1"></label>' +
+      '<label>模型筛选<input class="rc-filter" placeholder="any / claude-3-5-sonnet" value="any"></label></div>';
+    d.querySelector(".rc-del").addEventListener("click", function () { if ($("tmRoles").children.length > 1) { d.remove(); updateBtn(); } });
+    d.querySelector(".rc-name").addEventListener("input", updateBtn);
+    $("tmRoles").appendChild(d);
+  }
+  function collectRoles() {
+    return [].slice.call($("tmRoles").children).map(function (c) {
+      return {
+        name: c.querySelector(".rc-name").value.trim(),
+        prompt: c.querySelector(".rc-prompt").value.trim(),
+        recruit_count: parseInt(c.querySelector(".rc-count").value, 10) || 1,
+        model_filter: c.querySelector(".rc-filter").value.trim() || "any",
+      };
+    }).filter(function (r) { return r.name; });
+  }
+  function updateBtn() {
+    var title = $("tmTitle").value.trim();
+    var reward = parseInt($("tmReward").value, 10) || 0;
+    var roles = collectRoles();
+    if (reward > balance) setMsg("奖励金超过可用余额 " + balance, "bad"); else setMsg("");
+    $("tmCreate").disabled = !(title && repoChecked && roles.length > 0 && reward >= 0 && reward <= balance);
+  }
+
+  async function open() {
+    ["tmTitle", "tmUrl", "tmHost", "tmPath", "tmBranch"].forEach(function (id) { $(id).value = ""; });
+    $("tmReward").value = "0";
+    repoChecked = false; setChk(""); setMsg("");
+    $("tmRoles").innerHTML = ""; addRoleCard();
+    repoKind = "opensource"; setSeg("tmRepoKind", "opensource", "data-k"); showRepoFields();
+    vis = "network"; setSeg("tmVis", "network", "data-v");
+    try { var w = await getWallet(); balance = w.balance || 0; } catch (e) { balance = 0; }
+    $("tmBalance").textContent = "可用 " + balance + " 币";
+    updateBtn();
+    modal.hidden = false;
+  }
+  function close() { modal.hidden = true; }
+
+  $("tmRepoKind").addEventListener("click", function (e) { var b = e.target.closest("button"); if (!b) return; repoKind = b.getAttribute("data-k"); setSeg("tmRepoKind", repoKind, "data-k"); showRepoFields(); repoChecked = false; setChk(""); updateBtn(); });
+  $("tmVis").addEventListener("click", function (e) { var b = e.target.closest("button"); if (!b) return; vis = b.getAttribute("data-v"); setSeg("tmVis", vis, "data-v"); });
+
+  $("tmCheck").addEventListener("click", async function () {
+    var body = { kind: repoKind, branch: $("tmBranch").value.trim() };
+    if (repoKind === "opensource") { body.url = $("tmUrl").value.trim(); if (!body.url) { setChk("请填仓库地址", "bad"); return; } }
+    else { body.host = $("tmHost").value.trim(); body.path = $("tmPath").value.trim(); if (!body.host || !body.path) { setChk("请填服务器与目录", "bad"); return; } }
+    setChk("检测中…", "wait"); this.disabled = true;
+    try {
+      var r = await checkRepo(body);
+      if (r.ok) { repoChecked = true; setChk("✓ 连通 · 分支 " + (r.branches || []).slice(0, 5).join("/"), "ok"); }
+      else { repoChecked = false; setChk("✗ " + (r.error || "无法连通"), "bad"); }
+    } catch (e) { repoChecked = false; setChk("✗ " + e.message, "bad"); }
+    this.disabled = false; updateBtn();
+  });
+
+  $("tmAddRole").addEventListener("click", function () { addRoleCard(); updateBtn(); });
+  $("tmTitle").addEventListener("input", updateBtn);
+  $("tmReward").addEventListener("input", updateBtn);
+
+  $("tmCreate").addEventListener("click", async function () {
+    var body = {
+      title: $("tmTitle").value.trim(),
+      reward: parseInt($("tmReward").value, 10) || 0,
+      visibility: vis,
+      roles: collectRoles(),
+      repo: { kind: repoKind, branch: $("tmBranch").value.trim(), url: $("tmUrl").value.trim(), host: $("tmHost").value.trim(), path: $("tmPath").value.trim() },
+    };
+    this.disabled = true; setMsg("创建中…");
+    try {
+      var r = await composeTask(body);
+      setMsg("✓ 已创建任务 " + r.taskId, "ok");
+      tasks = await getTasks(); renderTasks(currentFilter); renderOverviewTasks();
+      setTimeout(close, 800);
+    } catch (e) { setMsg("✗ " + e.message, "bad"); this.disabled = false; }
+  });
+
+  var nt = $("newTask"); if (nt) nt.addEventListener("click", function (e) { e.preventDefault(); open(); });
+  $("tmClose").addEventListener("click", close);
+  $("tmCancel").addEventListener("click", close);
+  modal.addEventListener("click", function (e) { if (e.target === modal) close(); });
 }
 
 /* ───────────── nav + actions ───────────── */

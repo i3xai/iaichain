@@ -292,3 +292,61 @@ export async function getTeam() {
     return [];
   }
 }
+
+/* ───────────── 阶段 8：协作任务市场 V2（角色库 / 仓库检测 / 创建） ───────────── */
+
+async function reqJSON(method, path, body) {
+  const res = await fetch(BASE + path, {
+    method,
+    headers: { "Content-Type": "application/json", Accept: "application/json", ...authHeaders() },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 401) {
+    const p = await res.json().catch(() => ({}));
+    clearToken();
+    fireUnauthorized(path);
+    throw new AuthError(path, p);
+  }
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.error || e.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/** 本机角色库 `[{id,name,prompt,isCaptain,modelFilter}]`（队长在前）。 */
+export async function getRoles() {
+  try {
+    return await getJSON("/api/roles");
+  } catch {
+    return [];
+  }
+}
+export async function addRole(body) {
+  return postJSON("/api/roles", body);
+}
+export async function updateRole(id, body) {
+  return reqJSON("PUT", `/api/roles/${id}`, body);
+}
+export async function deleteRole(id) {
+  return reqJSON("DELETE", `/api/roles/${id}`);
+}
+
+/** 仓库连通性检测。返回 `{ ok, branches?|error? }`（不通也是 HTTP 200）。 */
+export async function checkRepo(body) {
+  return postJSON("/api/repo/check", body);
+}
+
+/** V2 任务创建（仓库+多角色+招募+奖金）。 */
+export async function composeTask(body) {
+  return postJSON("/api/tasks/compose", body);
+}
+
+/** 任务操作日志。 */
+export async function getTaskLog(id) {
+  try {
+    return await getJSON(`/api/tasks/${id}/log`);
+  } catch {
+    return [];
+  }
+}

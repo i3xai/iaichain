@@ -166,6 +166,45 @@
     .spin{animation:none}
     .btn:active:not([disabled]){transform:none}
   }
+  /* 任务创建弹框 */
+  .modal-overlay{position:fixed;inset:0;z-index:80;display:grid;place-items:center;background:oklch(11% 0.01 255 / .7);backdrop-filter:blur(4px);padding:20px}
+  .modal-overlay[hidden]{display:none}
+  .modal{background:var(--surface);border:1px solid var(--border-bright);border-radius:14px;width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 24px 60px oklch(0% 0 0 / .5)}
+  .modal-head{display:flex;align-items:center;justify-content:space-between;padding:18px 20px;border-bottom:1px solid var(--border)}
+  .modal-head h2{font-family:var(--font-display);font-size:18px;font-weight:700}
+  .modal-x{background:transparent;border:0;color:var(--muted);font-size:22px;cursor:pointer;line-height:1;width:30px;height:30px;border-radius:7px}
+  .modal-x:hover{background:var(--surface-2);color:var(--fg)}
+  .modal-body{padding:18px 20px;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
+  .modal-foot{display:flex;justify-content:flex-end;gap:10px;padding:16px 20px;border-top:1px solid var(--border)}
+  .fld{display:flex;flex-direction:column;gap:7px}
+  .fld>span{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint)}
+  .modal input,.modal textarea{background:var(--bg-deep);border:1px solid var(--border);border-radius:8px;color:var(--fg);font-family:var(--font-body);font-size:13.5px;padding:9px 11px;width:100%}
+  .modal input.mono{font-family:var(--font-mono);font-size:12.5px}
+  .modal textarea{min-height:52px;resize:vertical}
+  .modal input:focus,.modal textarea:focus{outline:none;border-color:var(--accent)}
+  .seg{display:inline-flex;gap:4px;background:var(--bg-deep);border:1px solid var(--border);border-radius:9px;padding:4px;width:fit-content}
+  .seg button{font-family:var(--font-mono);font-size:12px;color:var(--muted);background:transparent;border:0;padding:6px 13px;border-radius:6px;cursor:pointer}
+  .seg button.on{background:var(--surface-2);color:var(--accent)}
+  .repo-fields{display:flex;flex-direction:column;gap:8px}
+  .repo-fields[hidden]{display:none}
+  .repo-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .repo-row input{flex:1;min-width:150px}
+  .chk{font-size:12px;font-family:var(--font-mono)}
+  .chk.ok{color:var(--green)}.chk.bad{color:var(--red)}.chk.wait{color:var(--amber)}
+  .role-card{background:var(--bg-deep);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px;display:flex;flex-direction:column;gap:8px}
+  .role-card .rc-top{display:flex;gap:8px;align-items:center}
+  .role-card .rc-top input{flex:1}
+  .role-card .rc-del{background:transparent;border:1px solid var(--border-bright);color:var(--muted);border-radius:7px;padding:7px 11px;cursor:pointer;font-size:12px;white-space:nowrap}
+  .role-card .rc-del:hover{border-color:var(--red);color:var(--red)}
+  .role-card .rc-meta{display:flex;gap:8px}
+  .role-card .rc-meta label{flex:1;display:flex;flex-direction:column;gap:4px;font-family:var(--font-mono);font-size:10.5px;color:var(--faint)}
+  .role-card.captain{border-color:var(--border-bright)}
+  .role-card .rc-badge{font-family:var(--font-mono);font-size:10.5px;color:var(--accent);background:oklch(80% 0.15 195 / .1);padding:2px 8px;border-radius:5px}
+  .fld-row{display:flex;gap:14px;align-items:flex-end}
+  .fld-row .fld{flex:1}
+  .bal{font-family:var(--font-mono);font-size:12px;color:var(--gold);white-space:nowrap;padding-bottom:9px}
+  .modal-msg{font-size:12.5px;min-height:18px}
+  .modal-msg.bad{color:var(--red)}.modal-msg.ok{color:var(--green)}
 </style>
 </head>
 <body>
@@ -317,6 +356,54 @@
         </div>
       </section>
     </main>
+  </div>
+</div>
+
+<!-- 任务创建弹框（需求 1-6） -->
+<div id="taskModal" class="modal-overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-label="新建任务">
+    <div class="modal-head"><h2>新建任务</h2><button class="modal-x" id="tmClose" aria-label="关闭">×</button></div>
+    <div class="modal-body">
+      <label class="fld"><span>任务标题</span><input id="tmTitle" placeholder="实现限流中间件"></label>
+
+      <div class="fld"><span>代码仓库</span>
+        <div class="seg" id="tmRepoKind">
+          <button type="button" class="on" data-k="opensource">开源仓库</button>
+          <button type="button" data-k="internal">内部服务器</button>
+        </div>
+      </div>
+      <div id="tmOpensource" class="repo-fields">
+        <input id="tmUrl" class="mono" placeholder="https://github.com/acme/repo">
+      </div>
+      <div id="tmInternal" class="repo-fields" hidden>
+        <input id="tmHost" class="mono" placeholder="10.0.0.5（节点 ssh 免密可达）">
+        <input id="tmPath" class="mono" placeholder="/srv/repo（须为 git 目录）">
+      </div>
+      <div class="repo-row">
+        <input id="tmBranch" class="mono" placeholder="分支（留空自动创建 task/<id>）">
+        <button type="button" class="btn btn-ghost" id="tmCheck">检测连通</button>
+        <span id="tmCheckMsg" class="chk"></span>
+      </div>
+
+      <div class="fld"><span>角色与招募（队长内置驱动；至少 1 个开发角色）</span>
+        <div id="tmRoles"></div>
+        <button type="button" class="btn btn-ghost" id="tmAddRole">+ 添加角色</button>
+      </div>
+
+      <div class="fld-row">
+        <label class="fld"><span>奖励金（贡献币，可空）</span><input id="tmReward" type="number" min="0" value="0"></label>
+        <span id="tmBalance" class="bal"></span>
+      </div>
+      <div class="fld"><span>可见性</span>
+        <div class="seg" id="tmVis"><button type="button" class="on" data-v="network">网络可领取</button><button type="button" data-v="private">仅本机</button></div>
+      </div>
+
+      <div class="modal-msg" id="tmMsg"></div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-ghost" id="tmCancel">取消</button>
+      <button type="button" class="btn btn-pri" id="tmCreate" disabled>创建任务</button>
+    </div>
   </div>
 </div>
 
