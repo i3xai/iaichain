@@ -158,3 +158,57 @@ pub fn verify_chain(entries: &[LedgerEntry]) -> Result<(), VerifyError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(seq: u64, amount: i64, prev: &str) -> LedgerEntry {
+        let kind = LedgerKind::Settle;
+        let entry_hash = compute_entry_hash(seq, 1000, kind, "self", amount, 0, "n", prev);
+        LedgerEntry {
+            seq,
+            ts_epoch: 1000,
+            kind,
+            node_id: "self".into(),
+            amount,
+            locked_delta: 0,
+            note: "n".into(),
+            prev_hash: prev.into(),
+            entry_hash,
+        }
+    }
+
+    fn chain() -> Vec<LedgerEntry> {
+        let e1 = entry(1, 180, GENESIS_PREV);
+        let e2 = entry(2, 120, &e1.entry_hash);
+        vec![e1, e2]
+    }
+
+    #[test]
+    fn valid_and_empty_chains_verify() {
+        assert!(verify_chain(&chain()).is_ok());
+        assert!(verify_chain(&[]).is_ok());
+    }
+
+    #[test]
+    fn tampered_amount_is_detected() {
+        let mut c = chain();
+        c[0].amount = 999; // 改金额但不改 entry_hash
+        assert!(matches!(verify_chain(&c), Err(VerifyError::HashMismatch { seq: 1 })));
+    }
+
+    #[test]
+    fn broken_prev_link_is_detected() {
+        let mut c = chain();
+        c[1].prev_hash = GENESIS_PREV.into();
+        assert!(matches!(verify_chain(&c), Err(VerifyError::PrevMismatch { seq: 2 })));
+    }
+
+    #[test]
+    fn seq_gap_is_detected() {
+        let mut c = chain();
+        c[1].seq = 5;
+        assert!(matches!(verify_chain(&c), Err(VerifyError::SeqGap { seq: 5, expected: 2 })));
+    }
+}
