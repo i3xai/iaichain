@@ -45,8 +45,43 @@ pub enum Command {
         #[command(subcommand)]
         action: MarketCmd,
     },
+    /// 团队：创建招募 / 邀请成员 / 成员列表。
+    Team {
+        #[command(subcommand)]
+        action: TeamCmd,
+    },
+    /// 网络概况（在线成员 / 已知节点 / 公开团队）。
+    Net,
     /// 打印版本号。
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TeamCmd {
+    /// 创建团队并发布招募：iai team create --recruit "需要 Rust 限流中间件"。
+    Create {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        recruit: String,
+    },
+    /// 邀请 / 登记成员节点：iai team invite --node node.4a91 --role 后端 --model "Claude 3.5"。
+    Invite {
+        #[arg(long)]
+        node: String,
+        #[arg(long)]
+        role: String,
+        #[arg(long)]
+        model: String,
+        /// 成员累计贡献点（自报）。
+        #[arg(long, default_value_t = 0)]
+        credits: i64,
+        /// 标记为离线。
+        #[arg(long)]
+        offline: bool,
+    },
+    /// 列出团队成员。
+    List,
 }
 
 #[derive(Subcommand, Debug)]

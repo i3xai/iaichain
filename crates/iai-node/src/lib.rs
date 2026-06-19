@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod registry;
+
 /// crate 版本（与 workspace 对齐）。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

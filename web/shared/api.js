@@ -74,11 +74,26 @@ export async function addModel(body) {
   return res.json();
 }
 
-/* ───────────── 阶段 4 将翻转：网络 ───────────── */
+/* ───────────── 阶段 4：已对接真实后端（网络 / 团队） ───────────── */
 
-/** 网络概况（阶段 4 翻转为 GET /api/network）。 */
+/** 网络概况。返回 { membersOnline, discovered, publicTeams }。 */
 export async function getNetwork() {
-  return { membersOnline: 5, discovered: 23, publicTeams: 3 };
+  try {
+    return await getJSON("/api/network");
+  } catch {
+    return { membersOnline: 0, discovered: 0, publicTeams: 0 };
+  }
+}
+
+/** 邀请 / 登记成员节点：POST /api/team/invite。 */
+export async function inviteMember(body) {
+  const res = await fetch(BASE + "/api/team/invite", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
 }
 
 /* ───────────── 阶段 2：已对接真实后端（钱包 / 账本） ───────────── */
@@ -162,7 +177,7 @@ export async function sellAsk(body) {
   return res.json();
 }
 
-/* ───────────── 阶段 5 将翻转：任务 / 团队 ───────────── */
+/* ───────────── 阶段 5 将翻转：任务 ───────────── */
 
 /** 任务列表（阶段 5 翻转为 GET /api/tasks + SSE 实时进度）。 */
 export async function getTasks() {
@@ -173,14 +188,11 @@ export async function getTasks() {
   ];
 }
 
-/** 团队成员节点（阶段 4 翻转为 GET /api/team）。 */
+/** 团队成员节点。返回 [[name, role, model, online01, creditsStr]]。 */
 export async function getTeam() {
-  return [
-    ["本机 · captain.7f3a", "队长", "GPT-4o", 1, "—"],
-    ["node.4a91", "后端", "Claude 3.5", 1, "2,180"],
-    ["node.7c20", "前端", "GPT-4o", 1, "1,540"],
-    ["node.b3df", "测试", "DeepSeek", 1, "980"],
-    ["node.19ae", "审查", "Claude 3.5", 1, "1,220"],
-    ["node.cc70", "文档", "本地 Qwen", 0, "640"],
-  ];
+  try {
+    return await getJSON("/api/team");
+  } catch {
+    return [];
+  }
 }

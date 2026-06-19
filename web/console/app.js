@@ -1,5 +1,5 @@
 // 节点控制台逻辑（ES module）。数据一律经 ../shared/api.js 接缝层取得。
-import { getMarketBook, getPriceSeries, buyAtLowest, getTasks, getTeam, getLedger, getVersion, getNode, getWallet } from "/shared/api.js";
+import { getMarketBook, getPriceSeries, buyAtLowest, getTasks, getTeam, getLedger, getVersion, getNode, getWallet, getNetwork } from "/shared/api.js";
 
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -171,7 +171,18 @@ async function renderWallet() {
   } catch (e) { /* 离线兜底：保留页面默认占位 */ }
 }
 
+// ---- 网络概况（已对接真实后端 /api/network） ----
+async function renderNetwork() {
+  try {
+    var s = await getNetwork();
+    var setTxt = function (id, t) { var el = document.getElementById(id); if (el) el.textContent = t; };
+    setTxt("netMembers", s.membersOnline);
+    setTxt("netDiscovered", s.discovered);
+    setTxt("netTeams", s.publicTeams);
+  } catch (e) { /* 离线兜底：保留默认占位 */ }
+}
+
 // ---- init ----
-renderAsk(); renderTasks("all"); renderTeam(); renderLedger(); renderWallet();
+renderAsk(); renderTasks("all"); renderTeam(); renderLedger(); renderWallet(); renderNetwork();
 lineChart("#ov-spark", 56, false);
 window.addEventListener("resize", function () { lineChart("#ov-spark", 56, false); if (document.querySelector(".view[data-view=market]").classList.contains("on")) drawMarket(); });

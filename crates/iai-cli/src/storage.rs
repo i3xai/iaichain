@@ -9,6 +9,7 @@
 use anyhow::Context;
 use iai_economic::ledger::{self, LedgerEntry, LedgerKind};
 use iai_economic::market::{self, Ask};
+use iai_node::registry::{NetworkStat, TeamMember};
 use iai_node::{derive_capabilities, gen_node_id, NodeRole, NodeStatus, Provider};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::PathBuf;
@@ -132,6 +133,29 @@ fn apply_migrations(conn: &Connection) -> anyhow::Result<()> {
         )
         .context("应用迁移 v3 失败")?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (3)", [])?;
+    }
+
+    // v4：团队与注册表。
+    if applied < 4 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS team (
+                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name         TEXT NOT NULL,
+                 recruit_text TEXT NOT NULL DEFAULT '',
+                 created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             CREATE TABLE IF NOT EXISTS team_member (
+                 node_id    TEXT PRIMARY KEY,
+                 role       TEXT NOT NULL,
+                 model      TEXT NOT NULL,
+                 online     INTEGER NOT NULL DEFAULT 1,
+                 credits    INTEGER NOT NULL DEFAULT 0,
+                 is_self    INTEGER NOT NULL DEFAULT 0,
+                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        )
+        .context("应用迁移 v4 失败")?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (4)", [])?;
     }
 
     Ok(())
@@ -427,4 +451,89 @@ pub fn list_price_points(conn: &Connection, limit: u32) -> anyhow::Result<Vec<i6
         .query_map([limit as i64], |r| r.get::<_, i64>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/* ---------- 阶段 4：团队与注册表 ---------- */
+
+/// 本机首个已配置模型的展示名（无则「未配置」）。
+fn self_model(conn: &Connection) -> anyhow::Result<String> {
+    Ok(list_models(conn)?
+        .first()
+        .map(|m| m.label.clone())
+        .unwrap_or_else(|| "未配置".to_string()))
+}
+
+/// 确保本机作为「队长」成员登记在注册表中（幂等 upsert：刷新角色/模型/在线）。
+pub fn ensure_self_member(conn: &Connection) -> anyhow::Result<()> {
+    let node_id = ensure_node(conn)?;
+    let role = get_node(conn)?.map(|n| n.role).unwrap_or(NodeRole::Captain);
+    let model = self_model(conn)?;
+    conn.execute(
+        "INSERT INTO team_member (node_id, role, model, online, credits, is_self)
+         VALUES (?1, ?2, ?3, 1, 0, 1)
+         ON CONFLICT(node_id) DO UPDATE SET role=excluded.role, model=excluded.model, online=1, is_self=1",
+        params![node_id, role.display_zh(), model],
+    )?;
+    Ok(())
+}
+
+/// 创建团队并发布招募（本机成为队长成员）。返回 team_id。
+pub fn create_team(conn: &Connection, name: &str, recruit: &str) -> anyhow::Result<i64> {
+    ensure_self_member(conn)?;
+    conn.execute(
+        "INSERT INTO team (name, recruit_text) VALUES (?1, ?2)",
+        params![name, recruit],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// 邀请 / 登记一个成员节点（幂等 upsert）。
+pub fn invite_member(
+    conn: &Connection,
+    node_id: &str,
+    role: &str,
+    model: &str,
+    credits: i64,
+    online: bool,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO team_member (node_id, role, model, online, credits, is_self)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0)
+         ON CONFLICT(node_id) DO UPDATE SET role=excluded.role, model=excluded.model,
+             online=excluded.online, credits=excluded.credits",
+        params![node_id, role, model, online as i64, credits],
+    )?;
+    Ok(())
+}
+
+fn map_member(r: &Row) -> rusqlite::Result<TeamMember> {
+    Ok(TeamMember {
+        node_id: r.get(0)?,
+        role: r.get(1)?,
+        model: r.get(2)?,
+        online: r.get::<_, i64>(3)? != 0,
+        credits: r.get(4)?,
+        is_self: r.get::<_, i64>(5)? != 0,
+    })
+}
+
+/// 团队成员列表（本机在前，其余按累计贡献降序）。
+pub fn list_team(conn: &Connection) -> anyhow::Result<Vec<TeamMember>> {
+    ensure_self_member(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT node_id, role, model, online, credits, is_self FROM team_member
+         ORDER BY is_self DESC, credits DESC, node_id ASC",
+    )?;
+    let rows = stmt.query_map([], map_member)?.collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 网络概况（在线成员 / 已知节点 / 公开团队数）。
+pub fn network_stat(conn: &Connection) -> anyhow::Result<NetworkStat> {
+    ensure_self_member(conn)?;
+    let members_online: i64 =
+        conn.query_row("SELECT COUNT(*) FROM team_member WHERE online = 1", [], |r| r.get(0))?;
+    let discovered: i64 = conn.query_row("SELECT COUNT(*) FROM team_member", [], |r| r.get(0))?;
+    let public_teams: i64 = conn.query_row("SELECT COUNT(*) FROM team", [], |r| r.get(0))?;
+    Ok(NetworkStat { members_online, discovered, public_teams })
 }

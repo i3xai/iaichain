@@ -9,9 +9,9 @@ mod storage;
 mod api;
 
 use clap::Parser;
-use cli::{Cli, Command, LedgerCmd, MarketCmd, ModelCmd, NodeCmd};
+use cli::{Cli, Command, LedgerCmd, MarketCmd, ModelCmd, NodeCmd, TeamCmd};
 use iai_economic::{credit, ledger, ledger::LedgerKind, market};
-use iai_node::Provider;
+use iai_node::{registry, Provider};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -30,6 +30,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Wallet => run_wallet(),
         Command::Ledger { action } => run_ledger(action),
         Command::Market { action } => run_market(action),
+        Command::Team { action } => run_team(action),
+        Command::Net => run_net(),
         Command::Version => {
             println!("iai-chain {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -186,5 +188,44 @@ fn run_market(action: MarketCmd) -> anyhow::Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn run_team(action: TeamCmd) -> anyhow::Result<()> {
+    let conn = storage::open_conn()?;
+    match action {
+        TeamCmd::Create { name, recruit } => {
+            let nm = name.unwrap_or_else(|| "我的团队".to_string());
+            let id = storage::create_team(&conn, &nm, &recruit)?;
+            println!("✓ 团队 #{id}「{nm}」已创建 · 招募：{recruit}");
+        }
+        TeamCmd::Invite { node, role, model, credits, offline } => {
+            storage::invite_member(&conn, &node, &role, &model, credits, !offline)?;
+            println!("✓ 已邀请成员 {node} · {role} · {model}");
+        }
+        TeamCmd::List => {
+            for m in storage::list_team(&conn)? {
+                let name = if m.is_self { format!("本机 · {}", m.node_id) } else { m.node_id.clone() };
+                let credits = if m.is_self { "—".to_string() } else { registry::format_credits(m.credits) };
+                println!(
+                    "{:<24} {:<6} {:<22} {} {}",
+                    name,
+                    m.role,
+                    m.model,
+                    if m.online { "在线" } else { "离线" },
+                    credits
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_net() -> anyhow::Result<()> {
+    let conn = storage::open_conn()?;
+    let s = storage::network_stat(&conn)?;
+    println!("在线成员  {}", s.members_online);
+    println!("已知节点  {}", s.discovered);
+    println!("公开团队  {}", s.public_teams);
     Ok(())
 }
