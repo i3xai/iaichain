@@ -6,6 +6,7 @@
 mod cli;
 mod embed;
 mod orchestrator;
+mod relay;
 mod storage;
 mod api;
 mod auth;
@@ -29,6 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Serve { port } => api::serve(port).await,
+        Command::Relay { port } => relay::serve_relay(port).await,
         Command::Model { action } => run_model(action),
         Command::Node { action } => run_node(action),
         Command::Wallet => run_wallet(),

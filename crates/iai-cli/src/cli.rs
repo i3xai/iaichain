@@ -23,6 +23,12 @@ pub enum Command {
         #[arg(long, default_value_t = 8787)]
         port: u16,
     },
+    /// 启动协调中继：任务公告板（节点经 IAI_RELAY 连接）。
+    Relay {
+        /// 监听端口（绑定 0.0.0.0，供网络内节点连接）。
+        #[arg(long, default_value_t = 8790)]
+        port: u16,
+    },
     /// 模型配置：让本机成为具备 AI 能力的节点。
     Model {
         #[command(subcommand)]

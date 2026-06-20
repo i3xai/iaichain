@@ -18,7 +18,7 @@ use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::{auth, embed::static_handler, orchestrator, storage};
+use crate::{auth, embed::static_handler, orchestrator, relay, storage};
 
 /// 启动本地服务，仅绑定回环地址。
 pub async fn serve(port: u16) -> anyhow::Result<()> {
@@ -76,6 +76,8 @@ pub fn router() -> Router {
         .route("/api/roles/:id", put(roles_update).delete(roles_delete))
         .route("/api/repo/check", post(repo_check))
         .route("/api/models/instances", get(models_instances))
+        .route("/api/network/tasks", get(network_tasks))
+        .route("/api/network/claim", post(network_claim))
         .route("/api/auth/logout", post(auth_logout))
         .layer(middleware::from_fn(require_auth));
 
@@ -748,9 +750,45 @@ async fn tasks_compose(Json(req): Json<ComposeReq>) -> ApiResult {
             .map_err(err500)?;
     }
 
-    // 异步驱动执行 + 结算（阶段 9 Mock；阶段 10/11 替换为真实领取/agent）
-    tokio::spawn(orchestrator::drive_v2(task_id.clone()));
-    Ok(Json(json!({ "ok": true, "taskId": task_id })))
+    // network + 配了中继 → 发布到公告板等领取；否则本地 Mock 执行（阶段 9 行为，兼容未联网）
+    let mut published = false;
+    if req.visibility == "network" {
+        if let Some(url) = relay::relay_url() {
+            let mut slots = Vec::new();
+            for role in &req.roles {
+                for i in 0..role.recruit_count.max(1) {
+                    slots.push(relay::SlotAd {
+                        slot_id: format!("{task_id}#{}#{i}", role.name),
+                        role: role.name.clone(),
+                        model_filter: role.model_filter.clone(),
+                        claimed_by: None,
+                    });
+                }
+            }
+            let repo_disp = if req.repo.kind == "internal" {
+                format!("{}:{}", req.repo.host, req.repo.path)
+            } else {
+                req.repo.url.clone()
+            };
+            let ad = relay::TaskAd {
+                task_id: task_id.clone(),
+                title: req.title.trim().to_string(),
+                repo: repo_disp,
+                reward: req.reward,
+                publisher: self_id.clone(),
+                slots,
+            };
+            if relay::publish_task(&url, &ad).await.is_ok() {
+                let _ = storage::set_task_state_str(&conn, &task_id, "recruiting");
+                let _ = storage::append_op_log(&conn, &task_id, &self_id, "publish", Some("已发布到网络公告板，等待领取"));
+                published = true;
+            }
+        }
+    }
+    if !published {
+        tokio::spawn(orchestrator::drive_v2(task_id.clone()));
+    }
+    Ok(Json(json!({ "ok": true, "taskId": task_id, "published": published })))
 }
 
 /// GET /api/tasks/:id/log —— 任务操作日志（需求 12）。
@@ -773,6 +811,64 @@ async fn models_instances() -> ApiResult {
         .map(|m| json!({ "node": m.node_id, "model": m.model, "status": m.status, "currentTask": m.current_task, "tokensUsed": m.tokens_used, "workSeconds": m.work_seconds }))
         .collect();
     Ok(Json(Value::Array(items)))
+}
+
+/* ---------- 阶段 10b：节点网络（中继公告板领取） ---------- */
+
+/// GET /api/network/tasks —— 网络可领取任务（从中继拉，过滤掉本节点发布的与已领满的）。
+async fn network_tasks() -> ApiResult {
+    let url = match relay::relay_url() {
+        Some(u) => u,
+        None => return Ok(Json(json!({ "relay": false, "tasks": [] }))),
+    };
+    let self_id = {
+        let c = storage::open_conn().map_err(err500)?;
+        storage::ensure_node(&c).map_err(err500)?
+    };
+    let board = relay::fetch_board(&url).await.map_err(err500)?;
+    let tasks: Vec<Value> = board
+        .iter()
+        .filter(|t| t.publisher != self_id)
+        .filter_map(|t| {
+            let open: Vec<Value> = t
+                .slots
+                .iter()
+                .filter(|s| s.claimed_by.is_none())
+                .map(|s| json!({ "slotId": s.slot_id, "role": s.role, "modelFilter": s.model_filter }))
+                .collect();
+            if open.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "taskId": t.task_id, "title": t.title, "repo": t.repo,
+                "reward": t.reward, "publisher": t.publisher, "openSlots": open
+            }))
+        })
+        .collect();
+    Ok(Json(json!({ "relay": true, "tasks": tasks })))
+}
+
+#[derive(Deserialize)]
+struct NetClaimReq {
+    slot_id: String,
+}
+
+/// POST /api/network/claim —— 本节点领取网络任务槽（经中继原子占位）。
+async fn network_claim(Json(req): Json<NetClaimReq>) -> ApiResult {
+    let url = match relay::relay_url() {
+        Some(u) => u,
+        None => return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "未配置中继 IAI_RELAY" })))),
+    };
+    let self_id = {
+        let c = storage::open_conn().map_err(err500)?;
+        storage::ensure_node(&c).map_err(err500)?
+    };
+    let ok = relay::claim_slot(&url, &req.slot_id, &self_id).await.map_err(err500)?;
+    if ok {
+        Ok(Json(json!({ "ok": true })))
+    } else {
+        Err((StatusCode::CONFLICT, Json(json!({ "error": "槽位已被领取或不存在" }))))
+    }
 }
 
 /* ---------- 控制台访问控制 ---------- */
