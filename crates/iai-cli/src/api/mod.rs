@@ -45,8 +45,23 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         "  改密码: `iai password set`；忘密码: `iai password reset`；查看初始密码: `iai password show`"
     );
 
+    // 托管匹配后台循环（开启后空闲自动领取网络任务）
+    tokio::spawn(hosted_loop());
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// 托管循环：每 8s 检查托管开关，开启且配了中继则自动匹配一次。
+async fn hosted_loop() {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        let hosted = storage::open_conn().ok().and_then(|c| storage::is_hosted(&c).ok()).unwrap_or(false);
+        if hosted && relay::relay_url().is_some() {
+            if let Ok(Some(slot)) = auto_match_once().await {
+                tracing::info!(slot = %slot, "托管自动领取槽位");
+            }
+        }
+    }
 }
 
 /// 组装路由：
@@ -78,6 +93,8 @@ pub fn router() -> Router {
         .route("/api/models/instances", get(models_instances))
         .route("/api/network/tasks", get(network_tasks))
         .route("/api/network/claim", post(network_claim))
+        .route("/api/match/auto", post(match_auto))
+        .route("/api/match/hosted", get(match_hosted_get).put(match_hosted))
         .route("/api/auth/logout", post(auth_logout))
         .layer(middleware::from_fn(require_auth));
 
@@ -869,6 +886,80 @@ async fn network_claim(Json(req): Json<NetClaimReq>) -> ApiResult {
     } else {
         Err((StatusCode::CONFLICT, Json(json!({ "error": "槽位已被领取或不存在" }))))
     }
+}
+
+/// 自动匹配一次：在公告板里挑**奖金最高**、本机有空闲匹配模型的开放槽并领取。
+/// 返回领到的 slot_id（无可匹配返回 None）。供手动「一键匹配」与「托管」共用。
+pub async fn auto_match_once() -> anyhow::Result<Option<String>> {
+    let url = match relay::relay_url() {
+        Some(u) => u,
+        None => return Ok(None),
+    };
+    let board = relay::fetch_board(&url).await?;
+    let conn = storage::open_conn()?;
+    let self_id = storage::ensure_node(&conn)?;
+    let models = storage::list_models(&conn)?;
+
+    let mut best: Option<(i64, String, String)> = None; // (reward, slot_id, model)
+    for t in &board {
+        if t.publisher == self_id {
+            continue;
+        }
+        for slot in &t.slots {
+            if slot.claimed_by.is_some() {
+                continue;
+            }
+            // 找一个匹配且空闲的本机模型
+            let mut pick: Option<String> = None;
+            for m in &models {
+                let matched =
+                    slot.model_filter == "any" || slot.model_filter == m.model || slot.model_filter == m.label;
+                if matched && !storage::is_model_busy(&conn, &self_id, &m.model)? {
+                    pick = Some(m.model.clone());
+                    break;
+                }
+            }
+            if pick.is_some() && best.as_ref().map_or(true, |(r, _, _)| t.reward > *r) {
+                best = Some((t.reward, slot.slot_id.clone(), pick.unwrap()));
+            }
+        }
+    }
+
+    if let Some((_, slot_id, model)) = best {
+        if relay::claim_slot(&url, &slot_id, &self_id).await? {
+            let task_id = slot_id.split('#').next().unwrap_or("").to_string();
+            storage::set_model_busy(&conn, &self_id, &model, &task_id)?;
+            return Ok(Some(slot_id));
+        }
+    }
+    Ok(None)
+}
+
+/// POST /api/match/auto —— 一键自动匹配（手动触发，需求 7）。
+async fn match_auto() -> ApiResult {
+    match auto_match_once().await {
+        Ok(Some(slot)) => Ok(Json(json!({ "ok": true, "claimed": slot }))),
+        Ok(None) => Ok(Json(json!({ "ok": true, "claimed": null, "message": "暂无可匹配任务" }))),
+        Err(e) => Err(err500(e)),
+    }
+}
+
+async fn match_hosted_get() -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let h = storage::is_hosted(&conn).map_err(err500)?;
+    Ok(Json(json!({ "hosted": h })))
+}
+
+#[derive(Deserialize)]
+struct HostedReq {
+    enabled: bool,
+}
+
+/// PUT /api/match/hosted —— 托管匹配开关（需求 7：开启后空闲自动领取）。
+async fn match_hosted(Json(req): Json<HostedReq>) -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    storage::set_hosted(&conn, req.enabled).map_err(err500)?;
+    Ok(Json(json!({ "ok": true, "hosted": req.enabled })))
 }
 
 /* ---------- 控制台访问控制 ---------- */

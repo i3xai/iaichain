@@ -356,6 +356,41 @@ export async function getModelInstances() {
   }
 }
 
+/* ───────────── 阶段 10b：网络任务（中继领取 / 自动匹配 / 托管） ───────────── */
+
+/** 网络可领取任务。返回 { relay, tasks:[{taskId,title,repo,reward,publisher,openSlots:[{slotId,role,modelFilter}]}] }。 */
+export async function getNetworkTasks() {
+  try {
+    return await getJSON("/api/network/tasks");
+  } catch {
+    return { relay: false, tasks: [] };
+  }
+}
+
+/** 领取网络任务槽。 */
+export async function claimSlot(slotId) {
+  return postJSON("/api/network/claim", { slot_id: slotId });
+}
+
+/** 一键自动匹配（选奖金最高的可匹配槽）。 */
+export async function autoMatch() {
+  return postJSON("/api/match/auto", {});
+}
+
+/** 托管开关状态。 */
+export async function getHosted() {
+  try {
+    return (await getJSON("/api/match/hosted")).hosted;
+  } catch {
+    return false;
+  }
+}
+
+/** 设置托管开关。 */
+export async function setHosted(enabled) {
+  return reqJSON("PUT", "/api/match/hosted", { enabled });
+}
+
 /** 任务操作日志。 */
 export async function getTaskLog(id) {
   try {

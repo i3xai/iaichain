@@ -316,6 +316,18 @@ fn apply_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.execute("INSERT INTO schema_migrations (version) VALUES (9)", [])?;
     }
 
+    // v10：通用键值设置（托管匹配开关等）。
+    if applied < 10 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS app_setting (
+                 key   TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );",
+        )
+        .context("应用迁移 v10 失败")?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (10)", [])?;
+    }
+
     Ok(())
 }
 
@@ -1361,4 +1373,30 @@ pub fn list_model_instances(conn: &Connection) -> anyhow::Result<Vec<ModelInstan
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/* ---------- 阶段 10b-2：通用设置（托管开关等） ---------- */
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO app_setting (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value=?2",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+pub fn get_setting(conn: &Connection, key: &str) -> anyhow::Result<Option<String>> {
+    let v: Option<String> = conn
+        .query_row("SELECT value FROM app_setting WHERE key = ?1", params![key], |r| r.get(0))
+        .optional()?;
+    Ok(v)
+}
+
+pub fn is_hosted(conn: &Connection) -> anyhow::Result<bool> {
+    Ok(get_setting(conn, "hosted")?.as_deref() == Some("1"))
+}
+
+pub fn set_hosted(conn: &Connection, enabled: bool) -> anyhow::Result<()> {
+    set_setting(conn, "hosted", if enabled { "1" } else { "0" })
 }

@@ -6,6 +6,7 @@ import {
   getMarketBook, getPriceSeries, buyAtLowest, getTasks, createTask,
   getTeam, getLedger, getVersion, getNode, getWallet, getNetwork, authLogout,
   checkRepo, composeTask, getTask, getTaskLog, getModelInstances,
+  getNetworkTasks, claimSlot, autoMatch, getHosted, setHosted,
 } from "/shared/api.js";
 
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -52,6 +53,7 @@ export async function init() {
   lineChart("#ov-spark", 56, false);
   bindTaskModal();
   bindTaskDetail();
+  bindNetwork();
 }
 
 /* ───────────── 任务详情弹框（阶段 9：角色槽 + 贡献分 + 操作日志） ───────────── */
@@ -226,8 +228,51 @@ function show(v) {
     if (on) { n.setAttribute("aria-current", "page"); } else { n.removeAttribute("aria-current"); }
   });
   document.getElementById("side").classList.remove("open");
-  if (v === "market") drawMarket();
+  if (v === "market") { drawMarket(); renderNetworkTasks(); }
   if (v === "models") renderModels();
+}
+
+/* ───────────── 网络任务公告板（阶段 10b：领取 / 自动匹配 / 托管） ───────────── */
+
+async function renderNetworkTasks() {
+  var box = document.getElementById("netTasks");
+  if (!box) return;
+  var r = await getNetworkTasks();
+  if (!r.relay) { box.innerHTML = '<div class="empty" style="padding:14px 0">未配置中继（IAI_RELAY）· 单机模式</div>'; return; }
+  if (!r.tasks.length) { box.innerHTML = '<div class="empty" style="padding:14px 0">网络上暂无可领取任务</div>'; return; }
+  box.innerHTML = r.tasks.map(function (t) {
+    var slots = t.openSlots.map(function (s) {
+      return '<div class="aslot"><span class="tag role">' + s.role + '</span><span class="a-model">' + s.modelFilter + '</span><button class="btn btn-ghost claim-btn" data-slot="' + s.slotId + '" style="margin-left:auto;padding:4px 10px;font-size:11px">领取</button></div>';
+    }).join("");
+    return '<div class="task" style="margin-bottom:10px"><div class="top"><span class="ttl">' + t.title + '</span><span class="tag" style="color:var(--gold);border-color:transparent;background:oklch(83% 0.13 80 / .12)">奖金 ' + t.reward + '</span><span class="repo">' + t.repo + ' · ' + t.publisher + '</span></div>' + slots + '</div>';
+  }).join("");
+}
+
+function bindNetwork() {
+  var amBtn = document.getElementById("autoMatchBtn");
+  if (amBtn) amBtn.addEventListener("click", async function () {
+    var self = this, old = this.textContent;
+    this.disabled = true; this.textContent = "匹配中…";
+    try { var r = await autoMatch(); self.textContent = r.claimed ? "已领取" : "暂无匹配"; }
+    catch (e) { self.textContent = "失败"; }
+    await renderNetworkTasks();
+    setTimeout(function () { self.textContent = old; self.disabled = false; }, 1500);
+  });
+  var hosted = document.getElementById("hostedToggle");
+  if (hosted) {
+    getHosted().then(function (h) { hosted.checked = !!h; });
+    hosted.addEventListener("change", async function () {
+      try { await setHosted(this.checked); } catch (e) { this.checked = !this.checked; }
+    });
+  }
+  var box = document.getElementById("netTasks");
+  if (box) box.addEventListener("click", async function (e) {
+    var b = e.target.closest(".claim-btn"); if (!b) return;
+    b.disabled = true; b.textContent = "领取中…";
+    try { await claimSlot(b.getAttribute("data-slot")); b.textContent = "已领取"; }
+    catch (e2) { b.textContent = "已被领取"; }
+    setTimeout(renderNetworkTasks, 800);
+  });
 }
 
 async function renderModels() {
