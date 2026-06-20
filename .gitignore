@@ -17,3 +17,6 @@
 
 # 系统
 .DS_Store
+
+# publish.sh 运行时生成的产物（指向各平台构建产物路径）
+.publish.last-*

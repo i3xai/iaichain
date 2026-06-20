@@ -120,11 +120,19 @@ asset_basename() {
 
 do_native_build() {
   local target="$1"
-  echo "→ 本机构建 $target"
-  cargo build --release --bin iai 2>&1 | tail -8
-  local bin="target/release/iai"
+  local out_dir="target/release-host"
+  echo "→ 本机构建 $target → $out_dir/"
+  mkdir -p "$out_dir"
+  cargo build --release --bin iai --target-dir "$out_dir" 2>&1 | tail -8
+  local bin="$out_dir/release/iai"
+  if [ ! -f "$bin" ]; then
+    echo "本机构建产物缺失: $bin" >&2
+    return 1
+  fi
   strip_binary "$bin" "$target"
   echo "  ✓ built $(ls -la "$bin" | awk '{print $5}') bytes"
+  # 记录 host 产物路径供 pack_one 取用
+  echo "$bin" > "$ROOT/.publish.last-host-bin"
 }
 
 do_docker_build() {
@@ -137,28 +145,31 @@ do_docker_build() {
   esac
   echo "→ Docker 构建 $target ($platform)"
 
-  local image_dir
-  image_dir=$(mktemp -d -t iai-build-XXXXXX)
-  cp target/release/iai "$image_dir/iai.host" 2>/dev/null || true
+  # 用独立 target dir，避免覆盖 host 的 target/release/iai
+  local out_dir="$ROOT/target/release-docker-$target"
+  rm -rf "$out_dir"
+  mkdir -p "$out_dir"
 
   docker run --rm \
     --platform "$platform" \
     -v "$ROOT":/src \
+    -v "$out_dir":/out \
     -w /src \
     "$DOCKER_IMAGE" \
     sh -c 'apt-get update -qq >/dev/null 2>&1 && \
            apt-get install -y -qq pkg-config libssl-dev >/dev/null 2>&1 && \
-           cargo build --release --bin iai 2>&1 | tail -5 && \
-           strip /src/target/release/iai -o /src/target/release/iai.stripped && \
-           chmod 755 /src/target/release/iai.stripped && \
-           ls -la /src/target/release/iai.stripped'
+           CARGO_TARGET_DIR=/out cargo build --release --bin iai 2>&1 | tail -5 && \
+           strip /out/release/iai -o /out/release/iai.stripped && \
+           chmod 755 /out/release/iai.stripped && \
+           ls -la /out/release/iai.stripped'
 
-  local bin="target/release/iai.stripped"
+  local bin="$out_dir/release/iai.stripped"
   if [ ! -f "$bin" ]; then
     echo "Docker 构建产物缺失: $bin" >&2
     return 1
   fi
   echo "  ✓ built $(ls -la "$bin" | awk '{print $5}') bytes"
+  echo "$bin" > "$ROOT/.publish.last-docker-bin-$target"
 }
 
 pack_one() {
@@ -169,27 +180,30 @@ pack_one() {
   local tmp_dir
   tmp_dir=$(mktemp -d -t iai-pack-XXXXXX)
 
+  # 选输入二进制路径
+  local bin=""
+  if [ "$target" = "$host_target" ]; then
+    bin=$(cat "$ROOT/.publish.last-host-bin" 2>/dev/null || echo "")
+  else
+    bin=$(cat "$ROOT/.publish.last-docker-bin-$target" 2>/dev/null || echo "")
+  fi
+  if [ -z "$bin" ] || [ ! -f "$bin" ]; then
+    echo "未找到 $target 的构建产物" >&2
+    return 1
+  fi
+
   # tar 包内容：单个 iai 二进制 + 顶层目录
   local tar_top="iai-v${ver}-${target}"
   mkdir -p "$tmp_dir/$tar_top"
-
-  # 选择输入：Docker 流程会产生 iai.stripped；host/macOS 流程只有 iai
-  if [ -f target/release/iai.stripped ]; then
-    cp target/release/iai.stripped "$tmp_dir/$tar_top/iai"
-  else
-    cp target/release/iai          "$tmp_dir/$tar_top/iai"
-  fi
+  cp "$bin" "$tmp_dir/$tar_top/iai"
   chmod 755 "$tmp_dir/$tar_top/iai"
 
-  # 用绝对路径 dist，避免 cd 后相对路径错乱
   local dist_abs="$ROOT/dist"
   (cd "$tmp_dir" && tar czf "$dist_abs/$tar_name" "$tar_top")
-
-  # SHA256（sha256sum 兼容格式：<hash>  <file>）
   (cd "$dist_abs" && sha256sum "$tar_name" > "$tar_name.sha256")
 
   rm -rf "$tmp_dir"
-  echo "  📦 dist/$tar_name  +  .sha256"
+  echo "  📦 dist/$tar_name  +  .sha256  ($(wc -c < "$dist_abs/$tar_name") bytes)"
 }
 
 # ── 主流程 ─────────────────────────────────────────────────────
