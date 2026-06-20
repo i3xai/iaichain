@@ -1400,3 +1400,35 @@ pub fn is_hosted(conn: &Connection) -> anyhow::Result<bool> {
 pub fn set_hosted(conn: &Connection, enabled: bool) -> anyhow::Result<()> {
     set_setting(conn, "hosted", if enabled { "1" } else { "0" })
 }
+
+/* ---------- 阶段 11：真实执行（Provider + worktree） ---------- */
+
+/// 本机首个模型配置（含 key，仅内部执行用，不经 API）。返回 (provider, model, key)。
+pub fn first_model_with_key(conn: &Connection) -> anyhow::Result<Option<(String, String, Option<String>)>> {
+    let row = conn
+        .query_row(
+            "SELECT provider, model, api_key FROM model_config ORDER BY created_at, id LIMIT 1",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)),
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// 任务仓库信息：(kind, url, host, path, branch)。
+pub fn get_task_repo(conn: &Connection, task_id: &str) -> anyhow::Result<Option<(String, String, String, String, String)>> {
+    let row = conn
+        .query_row(
+            "SELECT repo_kind, repo_url, server_host, server_path, branch FROM task WHERE task_id = ?1",
+            params![task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// 记录 assignment 的 worktree 路径。
+pub fn set_assignment_worktree(conn: &Connection, id: i64, path: &str) -> anyhow::Result<()> {
+    conn.execute("UPDATE assignment SET worktree_path = ?1 WHERE id = ?2", params![path, id])?;
+    Ok(())
+}

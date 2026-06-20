@@ -5,9 +5,11 @@
 
 mod cli;
 mod embed;
+mod llm;
 mod orchestrator;
 mod relay;
 mod storage;
+mod worktree;
 mod api;
 mod auth;
 mod upgrade;

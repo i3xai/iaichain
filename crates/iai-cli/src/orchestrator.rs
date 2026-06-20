@@ -177,6 +177,31 @@ async fn drive_v2_inner(task_id: &str) -> anyhow::Result<()> {
         storage::set_task_state_str(&c, task_id, "executing")?;
     }
 
+    // 本机真实 LLM 配置（无则各槽回退 Mock）
+    let llm_cfg = {
+        let c = storage::open_conn()?;
+        storage::first_model_with_key(&c)
+            .ok()
+            .flatten()
+            .map(|(p, m, k)| crate::llm::LlmConfig { provider: p, model: m, key: k })
+    };
+    // git worktree 仓库（best-effort，clone 失败回退无 worktree）
+    let repo_dir: Option<(std::path::PathBuf, String)> = {
+        let c = storage::open_conn()?;
+        match storage::get_task_repo(&c, task_id).ok().flatten() {
+            Some((kind, url, host, path, branch)) => {
+                match crate::worktree::prepare_repo(task_id, &kind, &url, &host, &path, &branch) {
+                    Ok(d) => Some((d, branch)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "worktree clone 跳过，回退无 worktree");
+                        None
+                    }
+                }
+            }
+            None => None,
+        }
+    };
+
     let assignments = {
         let c = storage::open_conn()?;
         storage::list_assignments(&c, task_id)?
@@ -200,28 +225,58 @@ async fn drive_v2_inner(task_id: &str) -> anyhow::Result<()> {
             storage::set_model_busy(&c, &node, &model, task_id)?;
             storage::append_op_log(&c, task_id, &node, "claim", Some(&format!("领取「{}」槽 · 模型 {model}", a.role_name)))?;
         }
-        tokio::time::sleep(Duration::from_millis(900)).await;
-
-        let req = ExecRequest {
-            subtask_id: a.id.to_string(),
-            role: a.role_name.clone(),
-            prompt: task.prompt.clone(),
-            repo: task.repo.clone(),
+        // 执行：本机配了真实 Provider → 真实 LLM；否则 Mock。
+        let prompt = format!(
+            "你是任务团队中的「{}」角色。任务目标：{}\n代码仓库：{}\n请直接给出你这个角色负责产出的内容（代码/测试/文档等），简洁可用。",
+            a.role_name, task.prompt, task.repo
+        );
+        let mock_exec = || {
+            let out = provider
+                .execute(&ExecRequest { subtask_id: a.id.to_string(), role: a.role_name.clone(), prompt: task.prompt.clone(), repo: task.repo.clone() }, &node)
+                .unwrap();
+            let t = out.content.chars().count() as i64;
+            (out.content, t)
         };
-        match provider.execute(&req, &node) {
-            Ok(out) => {
-                let tokens = out.content.chars().count() as i64;
-                let work_seconds = (tokens / 10).max(2); // Mock 工作时长（真实由 Provider 计时，阶段 11）
-                let c = storage::open_conn()?;
-                storage::finish_assignment(&c, a.id, tokens)?;
-                storage::set_model_idle(&c, &node, &model, tokens, work_seconds)?;
-                storage::append_op_log(&c, task_id, &node, "submit", Some(&format!("完成「{}」· {tokens} tokens · {work_seconds}s", a.role_name)))?;
+        let started = std::time::Instant::now();
+        let (content, tokens, real) = match llm_cfg.as_ref().filter(|c| crate::llm::is_real(c)) {
+            Some(cfg) => match crate::llm::call_llm(cfg, &prompt).await {
+                Ok(o) => (o.content, o.tokens, true),
+                Err(e) => {
+                    tracing::warn!(error = %e, "真实 LLM 调用失败，回退 Mock");
+                    let (c, t) = mock_exec();
+                    (c, t, false)
+                }
+            },
+            None => {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                let (c, t) = mock_exec();
+                (c, t, false)
             }
-            Err(e) => {
+        };
+        let work_seconds = if real { started.elapsed().as_secs().max(1) as i64 } else { (tokens / 10).max(2) };
+
+        // worktree 提交产出（best-effort）
+        let mut sha = String::new();
+        if let Some((ref dir, ref branch)) = repo_dir {
+            let result = crate::worktree::role_worktree(dir, branch, &a.role_name, a.slot_index).and_then(|wt| {
+                let s = crate::worktree::commit_output(&wt, &a.role_name, &content)?;
                 let c = storage::open_conn()?;
-                storage::set_assignment_status(&c, a.id, "failed")?;
-                storage::append_op_log(&c, task_id, &node, "fail", Some(&e.to_string()))?;
+                storage::set_assignment_worktree(&c, a.id, &wt.to_string_lossy())?;
+                Ok(s)
+            });
+            match result {
+                Ok(s) => sha = s,
+                Err(e) => tracing::warn!(error = %e, "worktree 提交跳过"),
             }
+        }
+
+        {
+            let c = storage::open_conn()?;
+            storage::finish_assignment(&c, a.id, tokens)?;
+            storage::set_model_idle(&c, &node, &model, tokens, work_seconds)?;
+            let tag = if real { "真实LLM" } else { "Mock" };
+            let extra = if sha.is_empty() { String::new() } else { format!(" · commit {sha}") };
+            storage::append_op_log(&c, task_id, &node, "submit", Some(&format!("完成「{}」({tag}) · {tokens} tokens · {work_seconds}s{extra}", a.role_name)))?;
         }
     }
 
