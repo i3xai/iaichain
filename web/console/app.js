@@ -5,7 +5,7 @@
 import {
   getMarketBook, getPriceSeries, buyAtLowest, getTasks, createTask,
   getTeam, getLedger, getVersion, getNode, getWallet, getNetwork, authLogout,
-  checkRepo, composeTask,
+  checkRepo, composeTask, getTask, getTaskLog,
 } from "/shared/api.js";
 
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -51,6 +51,47 @@ export async function init() {
   ensurePolling();
   lineChart("#ov-spark", 56, false);
   bindTaskModal();
+  bindTaskDetail();
+}
+
+/* ───────────── 任务详情弹框（阶段 9：角色槽 + 贡献分 + 操作日志） ───────────── */
+
+function bindTaskDetail() {
+  var modal = document.getElementById("detailModal");
+  if (!modal) return;
+  var list = document.getElementById("taskList");
+  if (list) list.addEventListener("click", function (e) {
+    var card = e.target.closest(".task"); if (!card) return;
+    var id = card.getAttribute("data-tid"); if (id) openTaskDetail(id);
+  });
+  document.getElementById("dmClose").addEventListener("click", function () { modal.hidden = true; });
+  modal.addEventListener("click", function (e) { if (e.target === modal) modal.hidden = true; });
+}
+
+async function openTaskDetail(id) {
+  var $ = function (x) { return document.getElementById(x); };
+  var esc = function (s) { return String(s == null ? "" : s).replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }); };
+  try {
+    var d = await getTask(id);
+    var log = await getTaskLog(id);
+    $("dmTitle").textContent = d.t || "任务详情";
+    $("dmMeta").innerHTML =
+      '<div class="dm-row"><span class="dm-k">状态</span><span class="dm-v">' + esc(d.state || d.st) + " · " + d.pct + '%</span></div>' +
+      '<div class="dm-row"><span class="dm-k">仓库</span><span class="dm-v">' + esc(d.repo) + "</span></div>";
+    var assigns = d.assignments || [];
+    $("dmAssigns").innerHTML = assigns.length ? assigns.map(function (a) {
+      var st = a.status === "done" ? '<span class="tag done">完成</span>' : a.status === "working" ? '<span class="spin"></span>' : '<span class="qty" style="font-size:11px">' + esc(a.status) + "</span>";
+      return '<div class="aslot"><span class="tag role">' + esc(a.role) + '</span><span class="a-node">' + esc(a.node || "未领取") + '</span><span class="a-model">' + esc(a.model || "") + "</span>" + st + '<span class="a-tok">' + (a.tokens || 0) + " tok</span></div>";
+    }).join("") : '<div class="empty" style="padding:8px 0">暂无</div>';
+    var rewards = d.rewards || [];
+    $("dmRewards").innerHTML = rewards.length ? rewards.map(function (r) {
+      return '<div class="dm-row"><span class="dm-k">' + esc(r.role) + " · " + esc(r.node) + '</span><span class="dm-v" style="color:var(--gold)">+' + r.credits + " 币 (" + esc(r.basis) + ")</span></div>";
+    }).join("") : '<div class="empty" style="padding:8px 0">未结算</div>';
+    $("dmLog").innerHTML = log.length ? log.map(function (l) {
+      return '<div class="tl-item"><span class="tl-act">' + esc(l.action) + '</span><span class="tl-detail">' + esc(l.detail || "") + "</span></div>";
+    }).join("") : '<div class="empty" style="padding:8px 0">无日志</div>';
+    document.getElementById("detailModal").hidden = false;
+  } catch (e) { /* 静默 */ }
 }
 
 /* ───────────── 任务创建弹框（阶段 8） ───────────── */
@@ -286,7 +327,7 @@ function renderTasks(f) {
   list.forEach(function (t) {
     var roles = t.roles.map(roleChip).join("");
     var badge = t.st === "done" ? '<span class="tag done">已采纳 · 发起方获得功能</span>' : '<span class="tag run">运行中 ' + t.pct + "%</span>";
-    box.innerHTML += '<div class="task"><div class="top"><span class="ttl">' + t.t + "</span>" + badge + '<span class="repo">' + t.repo + ' (public)</span></div><div class="roles">' + roles + "</div></div>";
+    box.innerHTML += '<div class="task" data-tid="' + (t.id || "") + '" style="cursor:pointer"><div class="top"><span class="ttl">' + t.t + "</span>" + badge + '<span class="repo">' + t.repo + ' (public)</span></div><div class="roles">' + roles + "</div></div>";
   });
 }
 function renderOverviewTasks() {

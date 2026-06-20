@@ -342,6 +342,11 @@ export async function composeTask(body) {
   return postJSON("/api/tasks/compose", body);
 }
 
+/** 任务详情（含 assignments + rewards + state + result）。 */
+export async function getTask(id) {
+  return getJSON(`/api/tasks/${id}`);
+}
+
 /** 任务操作日志。 */
 export async function getTaskLog(id) {
   try {
