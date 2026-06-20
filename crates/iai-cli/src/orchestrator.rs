@@ -225,58 +225,78 @@ async fn drive_v2_inner(task_id: &str) -> anyhow::Result<()> {
             storage::set_model_busy(&c, &node, &model, task_id)?;
             storage::append_op_log(&c, task_id, &node, "claim", Some(&format!("领取「{}」槽 · 模型 {model}", a.role_name)))?;
         }
-        // 执行：本机配了真实 Provider → 真实 LLM；否则 Mock。
+        // 审查循环：执行 → 队长审查 → 不达标退回重做(≤3) → 达标采纳 / 3 次踢出重新招募
         let prompt = format!(
             "你是任务团队中的「{}」角色。任务目标：{}\n代码仓库：{}\n请直接给出你这个角色负责产出的内容（代码/测试/文档等），简洁可用。",
             a.role_name, task.prompt, task.repo
         );
-        let mock_exec = || {
-            let out = provider
-                .execute(&ExecRequest { subtask_id: a.id.to_string(), role: a.role_name.clone(), prompt: task.prompt.clone(), repo: task.repo.clone() }, &node)
-                .unwrap();
-            let t = out.content.chars().count() as i64;
-            (out.content, t)
-        };
-        let started = std::time::Instant::now();
-        let (content, tokens, real) = match llm_cfg.as_ref().filter(|c| crate::llm::is_real(c)) {
-            Some(cfg) => match crate::llm::call_llm(cfg, &prompt).await {
-                Ok(o) => (o.content, o.tokens, true),
-                Err(e) => {
-                    tracing::warn!(error = %e, "真实 LLM 调用失败，回退 Mock");
-                    let (c, t) = mock_exec();
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let started = std::time::Instant::now();
+            let exec_mock = |provider: &MockProvider| {
+                let out = provider
+                    .execute(&ExecRequest { subtask_id: a.id.to_string(), role: a.role_name.clone(), prompt: task.prompt.clone(), repo: task.repo.clone() }, &node)
+                    .unwrap();
+                (out.content.clone(), out.content.chars().count() as i64)
+            };
+            let (content, tokens, real) = match llm_cfg.as_ref().filter(|c| crate::llm::is_real(c)) {
+                Some(cfg) => match crate::llm::call_llm(cfg, &prompt).await {
+                    Ok(o) => (o.content, o.tokens, true),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "真实 LLM 调用失败，回退 Mock");
+                        let (c, t) = exec_mock(&provider);
+                        (c, t, false)
+                    }
+                },
+                None => {
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                    let (c, t) = exec_mock(&provider);
                     (c, t, false)
                 }
-            },
-            None => {
-                tokio::time::sleep(Duration::from_millis(700)).await;
-                let (c, t) = mock_exec();
-                (c, t, false)
-            }
-        };
-        let work_seconds = if real { started.elapsed().as_secs().max(1) as i64 } else { (tokens / 10).max(2) };
+            };
+            let work_seconds = if real { started.elapsed().as_secs().max(1) as i64 } else { (tokens / 10).max(2) };
 
-        // worktree 提交产出（best-effort）
-        let mut sha = String::new();
-        if let Some((ref dir, ref branch)) = repo_dir {
-            let result = crate::worktree::role_worktree(dir, branch, &a.role_name, a.slot_index).and_then(|wt| {
-                let s = crate::worktree::commit_output(&wt, &a.role_name, &content)?;
+            // 队长审查（质量门禁；角色名含「故障」者模拟始终不达标，用于演示踢出）
+            let verdict = quality::quality_gate(&content);
+            let accepted = verdict.gate_passed && !a.role_name.contains("故障");
+
+            if accepted {
+                let mut sha = String::new();
+                if let Some((ref dir, ref branch)) = repo_dir {
+                    if let Ok(s) = crate::worktree::role_worktree(dir, branch, &a.role_name, a.slot_index).and_then(|wt| {
+                        let s = crate::worktree::commit_output(&wt, &a.role_name, &content)?;
+                        let c = storage::open_conn()?;
+                        storage::set_assignment_worktree(&c, a.id, &wt.to_string_lossy())?;
+                        Ok(s)
+                    }) {
+                        sha = s;
+                    }
+                }
                 let c = storage::open_conn()?;
-                storage::set_assignment_worktree(&c, a.id, &wt.to_string_lossy())?;
-                Ok(s)
-            });
-            match result {
-                Ok(s) => sha = s,
-                Err(e) => tracing::warn!(error = %e, "worktree 提交跳过"),
+                storage::finish_assignment(&c, a.id, tokens)?;
+                storage::set_model_idle(&c, &node, &model, tokens, work_seconds)?;
+                let tag = if real { "真实LLM" } else { "Mock" };
+                let extra = if sha.is_empty() { String::new() } else { format!(" · commit {sha}") };
+                storage::append_op_log(&c, task_id, &self_id, "review", Some(&format!("审查通过「{}」(第 {attempt} 次)", a.role_name)))?;
+                storage::append_op_log(&c, task_id, &node, "submit", Some(&format!("完成「{}」({tag}) · {tokens} tokens · {work_seconds}s{extra}", a.role_name)))?;
+                break;
             }
-        }
 
-        {
-            let c = storage::open_conn()?;
-            storage::finish_assignment(&c, a.id, tokens)?;
-            storage::set_model_idle(&c, &node, &model, tokens, work_seconds)?;
-            let tag = if real { "真实LLM" } else { "Mock" };
-            let extra = if sha.is_empty() { String::new() } else { format!(" · commit {sha}") };
-            storage::append_op_log(&c, task_id, &node, "submit", Some(&format!("完成「{}」({tag}) · {tokens} tokens · {work_seconds}s{extra}", a.role_name)))?;
+            // 不达标 → 退回重做
+            {
+                let c = storage::open_conn()?;
+                storage::append_op_log(&c, task_id, &self_id, "reject", Some(&format!("审查退回「{}」(第 {attempt} 次未达标)", a.role_name)))?;
+            }
+            if attempt >= 3 {
+                // 重试 3 次仍不达标 → 踢出该角色，槽位回市场重新招募（需求 10）
+                let c = storage::open_conn()?;
+                storage::reopen_assignment(&c, a.id)?;
+                storage::set_model_idle(&c, &node, &model, 0, 0)?;
+                storage::append_op_log(&c, task_id, &self_id, "kick", Some(&format!("踢出「{}」(3 次未达标) · 槽位回市场重新招募", a.role_name)))?;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(400)).await; // 重做间隔
         }
     }
 

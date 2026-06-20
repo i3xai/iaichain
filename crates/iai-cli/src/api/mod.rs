@@ -47,6 +47,8 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
 
     // 托管匹配后台循环（开启后空闲自动领取网络任务）
     tokio::spawn(hosted_loop());
+    // 心跳监管：超时的 working 槽踢出重新招募（需求 10）
+    tokio::spawn(watchdog_loop());
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -59,6 +61,30 @@ async fn hosted_loop() {
         if hosted && relay::relay_url().is_some() {
             if let Ok(Some(slot)) = auto_match_once().await {
                 tracing::info!(slot = %slot, "托管自动领取槽位");
+            }
+        }
+    }
+}
+
+/// 心跳监管循环：每 30s 检测超时（>120s 未完成）的 working 槽 → 踢出 + 回市场重新招募。
+async fn watchdog_loop() {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let conn = match storage::open_conn() {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Ok(stale) = storage::list_stale_working(&conn, 120) {
+            for (id, task_id, _node, role) in stale {
+                let _ = storage::reopen_assignment(&conn, id);
+                let _ = storage::append_op_log(
+                    &conn,
+                    &task_id,
+                    "watchdog",
+                    "kick",
+                    Some(&format!("「{role}」超时无响应（重试 3 次）· 踢出重新招募")),
+                );
+                tracing::info!(task = %task_id, role = %role, "超时踢出重新招募");
             }
         }
     }

@@ -1432,3 +1432,28 @@ pub fn set_assignment_worktree(conn: &Connection, id: i64, path: &str) -> anyhow
     conn.execute("UPDATE assignment SET worktree_path = ?1 WHERE id = ?2", params![path, id])?;
     Ok(())
 }
+
+/// 踢出后槽位回市场（status open，清空领取信息，attempts+1）。
+pub fn reopen_assignment(conn: &Connection, id: i64) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE assignment SET status='open', node_id=NULL, model=NULL, started_at=NULL, attempts=attempts+1 WHERE id=?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// 超时的 working 槽（started_at 早于 now-seconds，UTC+8 口径）。返回 (id, task_id, node, role)。
+pub fn list_stale_working(
+    conn: &Connection,
+    seconds: i64,
+) -> anyhow::Result<Vec<(i64, String, Option<String>, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.task_id, a.node_id, tr.name FROM assignment a JOIN task_role tr ON a.task_role_id = tr.id
+         WHERE a.status='working' AND a.started_at IS NOT NULL
+           AND (strftime('%s','now') + 28800 - strftime('%s', a.started_at)) > ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![seconds], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
