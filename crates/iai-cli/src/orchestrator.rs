@@ -151,3 +151,89 @@ pub async fn drive(task_id: String) -> anyhow::Result<()> {
     tracing::info!(task = %task_id, total = settle.total, nodes = settle.nodes, "任务已结算（Settled）");
     Ok(())
 }
+
+/* ---------- 阶段 9：V2 任务驱动（Mock 执行 + 结算） ---------- */
+
+/// 驱动 compose 创建的 V2 任务：招募槽 open→claimed→working→done（MockProvider，模拟耗时）
+/// → 队长审查（Mock 通过）→ 结算分配（奖金均分 / 保底）。真实领取/worktree/LLM 在阶段 10/11 替换。
+pub async fn drive_v2(task_id: String) {
+    if let Err(e) = drive_v2_inner(&task_id).await {
+        tracing::error!(task = %task_id, error = %e, "V2 任务驱动失败");
+    }
+}
+
+async fn drive_v2_inner(task_id: &str) -> anyhow::Result<()> {
+    use std::time::Duration;
+    let provider = MockProvider;
+
+    let (task, self_id) = {
+        let c = storage::open_conn()?;
+        let t = storage::get_task(&c, task_id)?.context("任务不存在")?;
+        let me = storage::ensure_node(&c)?;
+        (t, me)
+    };
+    {
+        let c = storage::open_conn()?;
+        storage::set_task_state_str(&c, task_id, "executing")?;
+    }
+
+    let assignments = {
+        let c = storage::open_conn()?;
+        storage::list_assignments(&c, task_id)?
+    };
+    let members = {
+        let c = storage::open_conn()?;
+        storage::list_team(&c)?
+    };
+
+    for a in assignments.into_iter().filter(|a| a.status == "open") {
+        let node = match_node(&a.role_name, &members).unwrap_or_else(|| self_id.clone());
+        let model = members
+            .iter()
+            .find(|m| m.node_id == node)
+            .map(|m| m.model.clone())
+            .unwrap_or_else(|| "mock".to_string());
+        {
+            let c = storage::open_conn()?;
+            storage::claim_assignment(&c, a.id, &node, &model)?;
+            storage::set_assignment_status(&c, a.id, "working")?;
+            storage::append_op_log(&c, task_id, &node, "claim", Some(&format!("领取「{}」槽 · 模型 {model}", a.role_name)))?;
+        }
+        tokio::time::sleep(Duration::from_millis(900)).await;
+
+        let req = ExecRequest {
+            subtask_id: a.id.to_string(),
+            role: a.role_name.clone(),
+            prompt: task.prompt.clone(),
+            repo: task.repo.clone(),
+        };
+        match provider.execute(&req, &node) {
+            Ok(out) => {
+                let tokens = out.content.chars().count() as i64;
+                let c = storage::open_conn()?;
+                storage::finish_assignment(&c, a.id, tokens)?;
+                storage::append_op_log(&c, task_id, &node, "submit", Some(&format!("完成「{}」· {tokens} tokens", a.role_name)))?;
+            }
+            Err(e) => {
+                let c = storage::open_conn()?;
+                storage::set_assignment_status(&c, a.id, "failed")?;
+                storage::append_op_log(&c, task_id, &node, "fail", Some(&e.to_string()))?;
+            }
+        }
+    }
+
+    // 队长审查（Mock 通过）
+    {
+        let c = storage::open_conn()?;
+        storage::set_task_state_str(&c, task_id, "reviewing")?;
+        storage::append_op_log(&c, task_id, &self_id, "review", Some("队长审查：各角色产出达标"))?;
+        storage::set_task_state_str(&c, task_id, "aggregated")?;
+    }
+    // 结算分配
+    let s = {
+        let c = storage::open_conn()?;
+        storage::settle_task_v2(&c, task_id)?
+    };
+    tracing::info!(task = %task_id, total = s.total, nodes = s.nodes, bonus = s.bonus, "V2 任务已结算");
+    Ok(())
+}

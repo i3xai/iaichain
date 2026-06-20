@@ -9,7 +9,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
-    routing::{delete, get, post, put},
+    routing::{get, post, put},
     Json, Router,
 };
 use iai_economic::{credit, ledger, market};
@@ -407,6 +407,27 @@ async fn team_invite(Json(req): Json<InviteReq>) -> ApiResult {
 
 /// 把任务 + 子任务组装为前端任务卡所需结构 { id, t, repo, st, pct, roles }。
 fn task_json(conn: &Connection, t: &storage::TaskRow) -> anyhow::Result<Value> {
+    // V2 任务（compose 创建）：用招募槽 assignment 计算角色与进度。
+    let assigns = storage::list_assignments(conn, &t.task_id)?;
+    if !assigns.is_empty() {
+        let total = assigns.len();
+        let done = assigns.iter().filter(|a| a.status == "done").count();
+        let settled = t.state.is_delivered() || (total > 0 && done == total);
+        let pct = if settled { 100 } else if total > 0 { done * 100 / total } else { 0 };
+        let st = if settled { "done" } else { "run" };
+        let roles: Vec<Value> = assigns
+            .iter()
+            .map(|a| {
+                let s = match a.status.as_str() {
+                    "done" => "done",
+                    "working" | "claimed" => "run",
+                    _ => "wait",
+                };
+                json!([a.role_name, s])
+            })
+            .collect();
+        return Ok(json!({ "id": t.task_id, "t": t.title, "repo": t.repo, "st": st, "pct": pct, "roles": roles }));
+    }
     let subs = storage::list_subtasks(conn, &t.task_id)?;
     let total = subs.len().max(1);
     let done = subs.iter().filter(|s| s.status == "done").count();
@@ -467,6 +488,22 @@ async fn task_detail(Path(id): Path<String>) -> ApiResult {
     if let Value::Object(ref mut m) = v {
         m.insert("state".into(), json!(t.state.display_zh()));
         m.insert("result".into(), json!(t.result));
+        let assigns = storage::list_assignments(&conn, &id).map_err(err500)?;
+        m.insert(
+            "assignments".into(),
+            json!(assigns
+                .iter()
+                .map(|a| json!({ "role": a.role_name, "slot": a.slot_index, "node": a.node_id, "model": a.model, "status": a.status, "tokens": a.tokens }))
+                .collect::<Vec<_>>()),
+        );
+        let rewards = storage::list_reward_alloc(&conn, &id).map_err(err500)?;
+        m.insert(
+            "rewards".into(),
+            json!(rewards
+                .iter()
+                .map(|(node, role, credits, basis)| json!({ "node": node, "role": role, "credits": credits, "basis": basis }))
+                .collect::<Vec<_>>()),
+        );
     }
     Ok(Json(v))
 }
@@ -537,8 +574,6 @@ struct RepoCheckReq {
     host: String,
     #[serde(default)]
     path: String,
-    #[serde(default)]
-    branch: String,
 }
 
 fn shell_quote(s: &str) -> String {
@@ -712,6 +747,8 @@ async fn tasks_compose(Json(req): Json<ComposeReq>) -> ApiResult {
             .map_err(err500)?;
     }
 
+    // 异步驱动执行 + 结算（阶段 9 Mock；阶段 10/11 替换为真实领取/agent）
+    tokio::spawn(orchestrator::drive_v2(task_id.clone()));
     Ok(Json(json!({ "ok": true, "taskId": task_id })))
 }
 

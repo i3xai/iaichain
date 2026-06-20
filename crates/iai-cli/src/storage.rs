@@ -280,6 +280,24 @@ fn apply_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.execute("INSERT INTO schema_migrations (version) VALUES (7)", [])?;
     }
 
+    // v8：结算分配（贡献分 / 奖金平分记录）。
+    if applied < 8 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS reward_alloc (
+                 id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                 task_id TEXT NOT NULL,
+                 node_id TEXT NOT NULL,
+                 role    TEXT NOT NULL,
+                 credits INTEGER NOT NULL,
+                 basis   TEXT,
+                 ts      TEXT NOT NULL DEFAULT (datetime('now','+8 hours'))
+             );
+             CREATE INDEX IF NOT EXISTS idx_reward_alloc_task ON reward_alloc(task_id);",
+        )
+        .context("应用迁移 v8 失败")?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (8)", [])?;
+    }
+
     Ok(())
 }
 
@@ -1098,4 +1116,163 @@ pub fn create_task_v2(
         Some(&format!("repo={repo_display} branch={branch} reward={reward} dev_roles={}", dev_roles.len())),
     )?;
     Ok(task_id)
+}
+
+/* ---------- 阶段 9：执行流转 + 结算分配 ---------- */
+
+/// 招募槽（含角色名）。
+pub struct AssignmentRow {
+    pub id: i64,
+    pub role_name: String,
+    pub slot_index: i64,
+    pub node_id: Option<String>,
+    pub model: Option<String>,
+    pub status: String,
+    pub tokens: i64,
+}
+
+/// 某任务的招募槽（按角色/槽序）。
+pub fn list_assignments(conn: &Connection, task_id: &str) -> anyhow::Result<Vec<AssignmentRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, tr.name, a.slot_index, a.node_id, a.model, a.status, a.tokens
+         FROM assignment a JOIN task_role tr ON a.task_role_id = tr.id
+         WHERE a.task_id = ?1 ORDER BY a.task_role_id, a.slot_index",
+    )?;
+    let rows = stmt
+        .query_map(params![task_id], |r| {
+            Ok(AssignmentRow {
+                id: r.get(0)?,
+                role_name: r.get(1)?,
+                slot_index: r.get(2)?,
+                node_id: r.get(3)?,
+                model: r.get(4)?,
+                status: r.get(5)?,
+                tokens: r.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 领取槽位（open → claimed）。
+pub fn claim_assignment(conn: &Connection, id: i64, node: &str, model: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE assignment SET node_id = ?1, model = ?2, status = 'claimed',
+             started_at = datetime('now','+8 hours') WHERE id = ?3",
+        params![node, model, id],
+    )?;
+    Ok(())
+}
+
+pub fn set_assignment_status(conn: &Connection, id: i64, status: &str) -> anyhow::Result<()> {
+    conn.execute("UPDATE assignment SET status = ?1 WHERE id = ?2", params![status, id])?;
+    Ok(())
+}
+
+/// 完成槽位（→ done，记录 token）。
+pub fn finish_assignment(conn: &Connection, id: i64, tokens: i64) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE assignment SET status = 'done', tokens = ?1, ended_at = datetime('now','+8 hours') WHERE id = ?2",
+        params![tokens, id],
+    )?;
+    Ok(())
+}
+
+/// 直接更新任务状态字符串（V2 扩展状态：recruiting/executing/reviewing/aggregated/settled）。
+pub fn set_task_state_str(conn: &Connection, task_id: &str, state: &str) -> anyhow::Result<()> {
+    conn.execute("UPDATE task SET state = ?1 WHERE task_id = ?2", params![state, task_id])?;
+    Ok(())
+}
+
+/// 结算分配记录。
+pub fn list_reward_alloc(
+    conn: &Connection,
+    task_id: &str,
+) -> anyhow::Result<Vec<(String, String, i64, Option<String>)>> {
+    let mut stmt = conn
+        .prepare("SELECT node_id, role, credits, basis FROM reward_alloc WHERE task_id = ?1 ORDER BY id")?;
+    let rows = stmt
+        .query_map(params![task_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// V2 结算结果。
+pub struct SettleV2 {
+    pub total: i64,
+    pub nodes: i64,
+    pub bonus: bool, // true=保底（未配奖金）
+}
+
+/// 结算闭环（needs 11/5）：done 槽位按节点分配贡献分。
+/// - 配奖金：在 done 节点间**均分** reward_total（队长 Unlock 释放锁定，各节点 Settle 入账）；
+/// - 未配：每个 done 节点**保底 +1**。
+/// 同时累加 team_member 贡献、写 reward_alloc、置 settled+归档、记 op_log。原子提交。
+pub fn settle_task_v2(conn: &Connection, task_id: &str) -> anyhow::Result<SettleV2> {
+    let (captain, reward_total, title): (String, i64, String) = conn.query_row(
+        "SELECT captain_node, reward_total, title FROM task WHERE task_id = ?1",
+        params![task_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+
+    // done 槽位的 (node, role)，按节点去重保序
+    let dones: Vec<(String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT a.node_id, tr.name FROM assignment a JOIN task_role tr ON a.task_role_id = tr.id
+             WHERE a.task_id = ?1 AND a.status = 'done' AND a.node_id IS NOT NULL ORDER BY a.id",
+        )?;
+        let rows = stmt
+            .query_map(params![task_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut nodes: Vec<(String, String)> = Vec::new();
+    for (n, role) in dones {
+        if !nodes.iter().any(|(x, _)| x == &n) {
+            nodes.push((n, role));
+        }
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let bonus = reward_total <= 0;
+    let mut total = 0i64;
+
+    if !bonus {
+        // 释放队长锁定（钱已分给贡献者，仅清锁定池）
+        insert_entry(&tx, LedgerKind::Unlock, &captain, 0, -reward_total, &format!("任务「{title}」结算释放锁定"))?;
+        let cnt = nodes.len().max(1) as i64;
+        let per = reward_total / cnt;
+        let rem = reward_total % cnt;
+        for (i, (node, role)) in nodes.iter().enumerate() {
+            let share = per + if (i as i64) < rem { 1 } else { 0 };
+            insert_entry(&tx, LedgerKind::Settle, node, share, 0, &format!("任务「{title}」奖金分配"))?;
+            tx.execute("UPDATE team_member SET credits = credits + ?1 WHERE node_id = ?2", params![share, node])?;
+            tx.execute(
+                "INSERT INTO reward_alloc (task_id, node_id, role, credits, basis) VALUES (?1, ?2, ?3, ?4, '奖金均分')",
+                params![task_id, node, role, share],
+            )?;
+            total += share;
+        }
+    } else {
+        for (node, role) in &nodes {
+            insert_entry(&tx, LedgerKind::Settle, node, 1, 0, &format!("任务「{title}」保底贡献"))?;
+            tx.execute("UPDATE team_member SET credits = credits + 1 WHERE node_id = ?1", params![node])?;
+            tx.execute(
+                "INSERT INTO reward_alloc (task_id, node_id, role, credits, basis) VALUES (?1, ?2, ?3, 1, '保底')",
+                params![task_id, node, role],
+            )?;
+            total += 1;
+        }
+    }
+
+    tx.execute(
+        "UPDATE task SET state = 'settled', archived_at = datetime('now','+8 hours') WHERE task_id = ?1",
+        params![task_id],
+    )?;
+    tx.commit()?;
+
+    let basis = if bonus { "保底" } else { "奖金均分" };
+    append_op_log(conn, task_id, &captain, "settle", Some(&format!("{basis} 共 {total} 币 → {} 节点", nodes.len())))?;
+    append_op_log(conn, task_id, &captain, "archive", Some("任务已归档"))?;
+    Ok(SettleV2 { total, nodes: nodes.len() as i64, bonus })
 }
