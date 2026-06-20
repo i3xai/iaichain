@@ -197,6 +197,7 @@ async fn drive_v2_inner(task_id: &str) -> anyhow::Result<()> {
             let c = storage::open_conn()?;
             storage::claim_assignment(&c, a.id, &node, &model)?;
             storage::set_assignment_status(&c, a.id, "working")?;
+            storage::set_model_busy(&c, &node, &model, task_id)?;
             storage::append_op_log(&c, task_id, &node, "claim", Some(&format!("领取「{}」槽 · 模型 {model}", a.role_name)))?;
         }
         tokio::time::sleep(Duration::from_millis(900)).await;
@@ -210,9 +211,11 @@ async fn drive_v2_inner(task_id: &str) -> anyhow::Result<()> {
         match provider.execute(&req, &node) {
             Ok(out) => {
                 let tokens = out.content.chars().count() as i64;
+                let work_seconds = (tokens / 10).max(2); // Mock 工作时长（真实由 Provider 计时，阶段 11）
                 let c = storage::open_conn()?;
                 storage::finish_assignment(&c, a.id, tokens)?;
-                storage::append_op_log(&c, task_id, &node, "submit", Some(&format!("完成「{}」· {tokens} tokens", a.role_name)))?;
+                storage::set_model_idle(&c, &node, &model, tokens, work_seconds)?;
+                storage::append_op_log(&c, task_id, &node, "submit", Some(&format!("完成「{}」· {tokens} tokens · {work_seconds}s", a.role_name)))?;
             }
             Err(e) => {
                 let c = storage::open_conn()?;

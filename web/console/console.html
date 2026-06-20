@@ -258,6 +258,7 @@
     <div class="nav-item" data-view="tasks"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h10M4 18h7"/></svg>任务<span class="badge">2 运行中</span></div>
     <div class="nav-item" data-view="market"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h18l-2 11H5L3 6zM3 6L2 3"/><circle cx="9" cy="20" r="1"/><circle cx="17" cy="20" r="1"/></svg>市场</div>
     <div class="nav-item" data-view="team"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="9" cy="7" r="3"/><path d="M3 21v-1a6 6 0 0 1 12 0v1M16 3.5a3 3 0 0 1 0 7"/></svg>团队<span class="badge">5 在线</span></div>
+    <div class="nav-item" data-view="models"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9zM4 9h2M4 15h2M18 9h2M18 15h2M9 4v2M15 4v2M9 18v2M15 18v2"/></svg>模型</div>
     <div class="nav-group">账户</div>
     <div class="nav-item" data-view="wallet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M16 12h2"/></svg>钱包</div>
     <div class="side foot">本机节点 · <span class="v" id="footNode">captain.7f3a</span><br>iai-chain <span class="v" id="footVer">v0.4.2</span></div>
@@ -367,6 +368,14 @@
         </div>
         <div class="card deep"><h3>近期流水</h3>
           <table><thead><tr><th>时间</th><th>类型</th><th>说明</th><th style="text-align:right">变动</th></tr></thead><tbody id="ledgerBody"></tbody></table>
+        </div>
+      </section>
+
+      <!-- MODELS（阶段 10a：模型工作态）-->
+      <section class="view" data-view="models">
+        <div class="view-head"><div><h1>模型工作台</h1><p>每个模型同时只参与一个任务。队长可查看全网模型的工作状态、累计 token 与工作时长。</p></div></div>
+        <div class="card deep">
+          <table class="members"><thead><tr><th>节点</th><th>模型</th><th>状态</th><th>当前任务</th><th>累计 Token</th><th>工作时长</th></tr></thead><tbody id="modelBody"></tbody></table>
         </div>
       </section>
     </main>

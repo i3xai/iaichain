@@ -5,7 +5,7 @@
 import {
   getMarketBook, getPriceSeries, buyAtLowest, getTasks, createTask,
   getTeam, getLedger, getVersion, getNode, getWallet, getNetwork, authLogout,
-  checkRepo, composeTask, getTask, getTaskLog,
+  checkRepo, composeTask, getTask, getTaskLog, getModelInstances,
 } from "/shared/api.js";
 
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -227,6 +227,20 @@ function show(v) {
   });
   document.getElementById("side").classList.remove("open");
   if (v === "market") drawMarket();
+  if (v === "models") renderModels();
+}
+
+async function renderModels() {
+  var box = document.getElementById("modelBody");
+  if (!box) return;
+  var rows = await getModelInstances();
+  if (!rows.length) { box.innerHTML = '<tr><td colspan="6"><div class="empty" style="padding:18px 0">暂无模型工作记录 · 发起任务后出现</div></td></tr>'; return; }
+  box.innerHTML = rows.map(function (m) {
+    var st = m.status === "busy" ? '<span class="tag run">忙</span>' : '<span class="tag done">闲</span>';
+    var s = m.workSeconds || 0;
+    var dur = s < 60 ? s + "s" : s < 3600 ? Math.round(s / 60) + "m" : (s / 3600).toFixed(1) + "h";
+    return '<tr><td><span class="mono">' + m.node + '</span></td><td>' + m.model + '</td><td>' + st + '</td><td class="qty">' + (m.currentTask || "—") + '</td><td class="px tnum">' + (m.tokensUsed || 0).toLocaleString() + '</td><td class="qty">' + dur + '</td></tr>';
+  }).join("");
 }
 
 function bindActions() {

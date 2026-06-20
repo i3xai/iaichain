@@ -75,6 +75,7 @@ pub fn router() -> Router {
         .route("/api/roles", get(roles_list).post(roles_add))
         .route("/api/roles/:id", put(roles_update).delete(roles_delete))
         .route("/api/repo/check", post(repo_check))
+        .route("/api/models/instances", get(models_instances))
         .route("/api/auth/logout", post(auth_logout))
         .layer(middleware::from_fn(require_auth));
 
@@ -759,6 +760,17 @@ async fn task_log(Path(id): Path<String>) -> ApiResult {
     let items: Vec<Value> = logs
         .iter()
         .map(|(ts, actor, action, detail)| json!({ "ts": ts, "actor": actor, "action": action, "detail": detail }))
+        .collect();
+    Ok(Json(Value::Array(items)))
+}
+
+/// GET /api/models/instances —— 模型工作态（需求 8/9）。
+async fn models_instances() -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let rows = storage::list_model_instances(&conn).map_err(err500)?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|m| json!({ "node": m.node_id, "model": m.model, "status": m.status, "currentTask": m.current_task, "tokensUsed": m.tokens_used, "workSeconds": m.work_seconds }))
         .collect();
     Ok(Json(Value::Array(items)))
 }

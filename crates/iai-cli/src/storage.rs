@@ -298,6 +298,24 @@ fn apply_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.execute("INSERT INTO schema_migrations (version) VALUES (8)", [])?;
     }
 
+    // v9：模型工作态（单模型单任务约束 + token/工作时长，需求 8/9）。
+    if applied < 9 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS model_instance (
+                 node_id      TEXT NOT NULL,
+                 model        TEXT NOT NULL,
+                 status       TEXT NOT NULL DEFAULT 'idle',
+                 current_task TEXT,
+                 tokens_used  INTEGER NOT NULL DEFAULT 0,
+                 work_seconds INTEGER NOT NULL DEFAULT 0,
+                 updated_at   TEXT,
+                 PRIMARY KEY (node_id, model)
+             );",
+        )
+        .context("应用迁移 v9 失败")?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (9)", [])?;
+    }
+
     Ok(())
 }
 
@@ -1275,4 +1293,72 @@ pub fn settle_task_v2(conn: &Connection, task_id: &str) -> anyhow::Result<Settle
     append_op_log(conn, task_id, &captain, "settle", Some(&format!("{basis} 共 {total} 币 → {} 节点", nodes.len())))?;
     append_op_log(conn, task_id, &captain, "archive", Some("任务已归档"))?;
     Ok(SettleV2 { total, nodes: nodes.len() as i64, bonus })
+}
+
+/* ---------- 阶段 10a：模型工作态（单模型单任务 + token/时长，需求 8/9） ---------- */
+
+/// 模型工作态（每 (node, model) 一行）。
+pub struct ModelInstanceRow {
+    pub node_id: String,
+    pub model: String,
+    pub status: String,
+    pub current_task: Option<String>,
+    pub tokens_used: i64,
+    pub work_seconds: i64,
+}
+
+/// 标记某 (node, model) 进入工作（busy + 当前任务）。
+pub fn set_model_busy(conn: &Connection, node: &str, model: &str, task_id: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO model_instance (node_id, model, status, current_task, updated_at)
+         VALUES (?1, ?2, 'busy', ?3, datetime('now','+8 hours'))
+         ON CONFLICT(node_id, model) DO UPDATE SET status='busy', current_task=?3, updated_at=datetime('now','+8 hours')",
+        params![node, model, task_id],
+    )?;
+    Ok(())
+}
+
+/// 标记某 (node, model) 空闲，并累加本次 token / 工作秒数。
+pub fn set_model_idle(conn: &Connection, node: &str, model: &str, tokens: i64, seconds: i64) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO model_instance (node_id, model, status, current_task, tokens_used, work_seconds, updated_at)
+         VALUES (?1, ?2, 'idle', NULL, ?3, ?4, datetime('now','+8 hours'))
+         ON CONFLICT(node_id, model) DO UPDATE SET status='idle', current_task=NULL,
+             tokens_used = tokens_used + ?3, work_seconds = work_seconds + ?4, updated_at=datetime('now','+8 hours')",
+        params![node, model, tokens, seconds],
+    )?;
+    Ok(())
+}
+
+/// 单模型单任务约束：某 (node, model) 是否正忙。
+pub fn is_model_busy(conn: &Connection, node: &str, model: &str) -> anyhow::Result<bool> {
+    let s: Option<String> = conn
+        .query_row(
+            "SELECT status FROM model_instance WHERE node_id = ?1 AND model = ?2",
+            params![node, model],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(s.as_deref() == Some("busy"))
+}
+
+/// 所有模型工作态（本机视角的网络模型，需求 9 队长查看全部）。
+pub fn list_model_instances(conn: &Connection) -> anyhow::Result<Vec<ModelInstanceRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT node_id, model, status, current_task, tokens_used, work_seconds
+         FROM model_instance ORDER BY node_id, model",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(ModelInstanceRow {
+                node_id: r.get(0)?,
+                model: r.get(1)?,
+                status: r.get(2)?,
+                current_task: r.get(3)?,
+                tokens_used: r.get(4)?,
+                work_seconds: r.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }

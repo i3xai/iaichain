@@ -347,6 +347,15 @@ export async function getTask(id) {
   return getJSON(`/api/tasks/${id}`);
 }
 
+/** 模型工作态（需求 8/9）。返回 [{node,model,status,currentTask,tokensUsed,workSeconds}]。 */
+export async function getModelInstances() {
+  try {
+    return await getJSON("/api/models/instances");
+  } catch {
+    return [];
+  }
+}
+
 /** 任务操作日志。 */
 export async function getTaskLog(id) {
   try {
