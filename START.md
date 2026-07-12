@@ -2,6 +2,8 @@
 
 拿到 `iai` 命令，并在本机用「中继 + 队长 + 队员」跑通 Phase 1 演示。
 
+在线版手册：https://iaiaiai.ai/docs/  
+
 更完整的命令与 API 说明见 [USAGE.md](USAGE.md)；产品规格见 [specs/STATUS.md](specs/STATUS.md)。
 
 ---

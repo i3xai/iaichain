@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>使用手册 · IAI Chain</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:oklch(15% 0.012 255);--bg-deep:oklch(11% 0.01 255);--surface:oklch(19% 0.014 255);
+  --surface-2:oklch(23% 0.016 255);--fg:oklch(95% 0.008 240);--muted:oklch(68% 0.015 240);
+  --faint:oklch(54% 0.015 240);--border:oklch(28% 0.014 255);--border-bright:oklch(38% 0.02 255);
+  --accent:oklch(80% 0.15 195);--gold:oklch(83% 0.13 80);--green:oklch(80% 0.18 150);
+  --red:oklch(68% 0.19 25);
+  --font-display:"Space Grotesk",-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --font-body:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono","SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  --maxw:920px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-body);font-size:16px;line-height:1.65;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{filter:brightness(1.1)}
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+.mono{font-family:var(--font-mono)}
+h1,h2,h3{font-family:var(--font-display);font-weight:700;letter-spacing:-.02em}
+header{position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);background:oklch(15% 0.012 255 / .82);border-bottom:1px solid var(--border)}
+nav{display:flex;align-items:center;gap:16px;height:58px}
+.brand{display:flex;align-items:center;gap:10px;font-family:var(--font-display);font-weight:700;color:var(--fg)}
+.brand span{color:var(--faint);font-size:12px;font-family:var(--font-mono);border:1px solid var(--border);border-radius:6px;padding:2px 7px;font-weight:500}
+.nav-links{display:flex;gap:18px;margin-left:auto;flex-wrap:wrap}
+.nav-links a{color:var(--muted);font-size:13.5px}
+.nav-links a:hover{color:var(--fg)}
+.hero{padding:56px 0 28px}
+.hero h1{font-size:clamp(28px,5vw,42px);margin-bottom:12px}
+.hero p{color:var(--muted);max-width:640px}
+.toc{display:flex;flex-wrap:wrap;gap:8px;margin:28px 0 8px}
+.toc a{font-size:12.5px;font-family:var(--font-mono);color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:6px 12px;background:var(--surface)}
+.toc a:hover{border-color:var(--accent);color:var(--accent)}
+section{padding:36px 0;border-top:1px solid var(--border)}
+section h2{font-size:22px;margin-bottom:8px}
+section .lead{color:var(--muted);margin-bottom:18px;font-size:15px}
+h3{font-size:16px;margin:22px 0 10px;color:var(--fg)}
+ol,ul{padding-left:1.25rem;color:var(--muted);margin:10px 0}
+li{margin:6px 0}
+li strong{color:var(--fg);font-weight:600}
+pre,code{font-family:var(--font-mono)}
+pre{background:var(--bg-deep);border:1px solid var(--border-bright);border-radius:12px;padding:14px 16px;overflow-x:auto;font-size:13px;line-height:1.55;color:var(--fg);margin:12px 0 16px;position:relative}
+pre .pmt{color:var(--green)}
+pre .cmt{color:var(--faint)}
+code.inline{background:var(--surface-2);border:1px solid var(--border);border-radius:5px;padding:1px 6px;font-size:13px;color:var(--accent)}
+.table{width:100%;border-collapse:collapse;font-size:14px;margin:12px 0 18px}
+.table th,.table td{border:1px solid var(--border);padding:10px 12px;text-align:left}
+.table th{background:var(--surface);color:var(--muted);font-weight:600;font-size:12px;font-family:var(--font-mono)}
+.table td{color:var(--muted)}
+.table td:first-child{color:var(--fg);font-family:var(--font-mono);font-size:13px;white-space:nowrap}
+.callout{border:1px solid var(--border-bright);background:var(--surface);border-radius:12px;padding:14px 16px;margin:14px 0;color:var(--muted);font-size:14.5px}
+.callout strong{color:var(--gold)}
+.steps{counter-reset:step}
+.steps li{list-style:none;position:relative;padding-left:2.2rem;margin:14px 0}
+.steps li::before{counter-increment:step;content:counter(step);position:absolute;left:0;top:0;width:1.5rem;height:1.5rem;border-radius:50%;background:var(--surface-2);border:1px solid var(--border-bright);display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:11px;color:var(--accent)}
+.flow{font-family:var(--font-mono);font-size:13px;color:var(--muted);background:var(--bg-deep);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin:14px 0;overflow-x:auto;white-space:pre}
+footer{border-top:1px solid var(--border);padding:28px 0 48px;color:var(--faint);font-size:13px;font-family:var(--font-mono)}
+footer a{color:var(--muted)}
+.copy-btn{position:absolute;top:10px;right:10px;background:var(--surface-2);border:1px solid var(--border);color:var(--muted);border-radius:7px;padding:4px 8px;font-size:11px;font-family:var(--font-mono);cursor:pointer}
+.copy-btn:hover{color:var(--accent);border-color:var(--accent)}
+@media(max-width:720px){.nav-links{display:none}}
+</style>
+</head>
+<body>
+<header>
+  <nav class="wrap">
+    <a class="brand" href="/">IAI Chain <span>手册</span></a>
+    <div class="nav-links">
+      <a href="#install">安装</a>
+      <a href="#start">启动</a>
+      <a href="#join">入队</a>
+      <a href="#create">创建任务</a>
+      <a href="#claim">领取</a>
+      <a href="#faq">FAQ</a>
+      <a href="/console">控制台</a>
+    </div>
+  </nav>
+</header>
+
+<main class="wrap">
+  <div class="hero">
+    <h1>IAI Chain 使用手册</h1>
+    <p>从安装到「中继 + 队长 + 队员」跑通：创建网络任务、申请入队、领取槽位。对应产品 Phase 1 闭环。</p>
+    <div class="toc">
+      <a href="#install">1. 安装</a>
+      <a href="#start">2. 三进程启动</a>
+      <a href="#join">3. 入队审批</a>
+      <a href="#create">4. 创建任务</a>
+      <a href="#claim">5. 领取任务</a>
+      <a href="#faq">6. 常见问题</a>
+    </div>
+  </div>
+
+  <section id="install">
+    <h2>1. 安装 <code class="inline">iai</code></h2>
+    <p class="lead">推荐用官网安装脚本，从 GitHub Release 拉取当前系统预编译包。</p>
+
+    <h3>一键安装（推荐）</h3>
+<pre><button class="copy-btn" type="button" data-copy="curl -fsSL https://iaiaiai.ai/install.sh | bash">复制</button><span class="pmt">$</span> curl -fsSL https://iaiaiai.ai/install.sh | bash</pre>
+
+    <h3>指定版本 / 目录</h3>
+<pre><button class="copy-btn" type="button" data-copy="curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --version v0.4.2">复制</button><span class="cmt"># 指定版本</span>
+<span class="pmt">$</span> curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --version v0.4.2
+
+<span class="cmt"># 安装到自定义目录</span>
+<span class="pmt">$</span> curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --dir ~/.local/bin</pre>
+
+    <h3>验证</h3>
+<pre><span class="pmt">$</span> iai version
+<span class="cmt"># 期望类似：iai-chain 0.4.2</span></pre>
+
+    <div class="callout">当前 Release 若只有 <strong>macos-aarch64</strong> 资产，其他平台请用源码构建：<code class="inline">cargo build --release</code>。完整说明见仓库 <a href="https://github.com/i3xai/iaichain/blob/main/START.md">START.md</a> / <a href="https://github.com/i3xai/iaichain/blob/main/USAGE.md">USAGE.md</a>。</div>
+  </section>
+
+  <section id="start">
+    <h2>2. 启动：中继 + 队长 + 队员</h2>
+    <p class="lead">本机开 3 个终端，模拟网络协调与两个独立节点。数据目录必须分开。</p>
+
+    <table class="table">
+      <thead><tr><th>进程</th><th>命令</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td>中继</td><td><code class="inline">iai relay --port 8790</code></td><td>任务公告板、原子领取、入队状态（不记账）</td></tr>
+        <tr><td>队长</td><td><code class="inline">IAI_HOME=~/.iai-cap IAI_RELAY=… iai serve --port 8787</code></td><td>发任务、审批入队；控制台 :8787</td></tr>
+        <tr><td>队员</td><td><code class="inline">IAI_HOME=~/.iai-mem IAI_RELAY=… iai serve --port 8788</code></td><td>申请入队、领槽；控制台 :8788</td></tr>
+      </tbody>
+    </table>
+
+<pre><button class="copy-btn" type="button" data-copy="iai relay --port 8790">复制</button><span class="cmt"># 终端 0 · 中继</span>
+<span class="pmt">$</span> iai relay --port 8790
+
+<span class="cmt"># 终端 1 · 队长</span>
+<span class="pmt">$</span> IAI_HOME=~/.iai-cap IAI_RELAY=http://127.0.0.1:8790 iai serve --port 8787
+
+<span class="cmt"># 终端 2 · 队员</span>
+<span class="pmt">$</span> IAI_HOME=~/.iai-mem IAI_RELAY=http://127.0.0.1:8790 iai serve --port 8788</pre>
+
+    <table class="table">
+      <thead><tr><th>角色</th><th>控制台</th></tr></thead>
+      <tbody>
+        <tr><td>队长</td><td><a href="http://127.0.0.1:8787/console">http://127.0.0.1:8787/console</a></td></tr>
+        <tr><td>队员</td><td><a href="http://127.0.0.1:8788/console">http://127.0.0.1:8788/console</a></td></tr>
+      </tbody>
+    </table>
+
+    <p class="lead" style="margin-top:8px">首次启动会生成控制台密码（看日志），或：</p>
+<pre><span class="pmt">$</span> IAI_HOME=~/.iai-cap iai password show
+<span class="pmt">$</span> IAI_HOME=~/.iai-mem iai password show</pre>
+  </section>
+
+  <section id="join">
+    <h2>3. 入队审批（领取前置）</h2>
+    <p class="lead">未批准成员领取网络任务会得到 <strong>403</strong>。先完成申请 → 批准。</p>
+    <ol class="steps">
+      <li><strong>查队长 node id</strong>
+<pre><span class="pmt">$</span> IAI_HOME=~/.iai-cap iai node status</pre>
+        记下类似 <code class="inline">node.xxxx</code> 的标识。
+      </li>
+      <li><strong>队员申请</strong>：打开队员控制台 → 左侧「团队」→「申请 / 审批」→ 填入队长 node id →「提交申请」。</li>
+      <li><strong>队长批准</strong>：队长控制台同一面板 → 待审批列表 →「批准」。</li>
+    </ol>
+  </section>
+
+  <section id="create">
+    <h2>4. 队长创建任务</h2>
+    <p class="lead">创建「网络可领取」任务，才会出现在中继公告板供队员领取。</p>
+    <ol class="steps">
+      <li>队长控制台 →「任务」→「+ 新建任务」。</li>
+      <li>填写标题与说明；仓库选开源 GitHub 地址，先点<strong>连通检测</strong>。</li>
+      <li>至少配置 1 个非队长角色，招募数 ≥ 1。</li>
+      <li>可见性选择 <strong>「网络可领取」</strong>（不要选「仅本机」）。奖金可先填 0。</li>
+      <li>点击「创建任务」，记下返回的 task id。</li>
+    </ol>
+  </section>
+
+  <section id="claim">
+    <h2>5. 队员领取任务</h2>
+    <p class="lead">入队批准后，在队员控制台的网络任务列表领取开放槽。</p>
+    <ol class="steps">
+      <li>队员控制台打开网络任务 / 可领列表（与任务视图相关区域）。</li>
+      <li>找到队长刚发布的任务与开放槽 → 点 <strong>「领取」</strong>。</li>
+      <li>成功后按钮变为「已领取」。状态为 <code class="inline">claimed</code> 即完成本手册 Phase 1 验收。</li>
+    </ol>
+
+    <div class="flow">队员申请入队 → 队长批准 → 队长新建「网络可领取」任务 → 队员点领取</div>
+
+    <table class="table">
+      <thead><tr><th>结果</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>已领取</td><td>槽位 claimed，成功</td></tr>
+        <tr><td>403</td><td>未加入该队长团队或尚未批准</td></tr>
+        <tr><td>409</td><td>槽已被他人领走</td></tr>
+        <tr><td>未配置中继</td><td>启动 serve 时未设置 IAI_RELAY</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="faq">
+    <h2>6. 常见问题</h2>
+    <h3>command not found: iai</h3>
+    <p class="lead">检查 PATH，或重新执行安装脚本；源码构建可用 <code class="inline">./target/release/iai</code>。</p>
+
+    <h3>两个节点数据串了</h3>
+    <p class="lead">确认 <code class="inline">IAI_HOME</code> 分别是 <code class="inline">~/.iai-cap</code> 与 <code class="inline">~/.iai-mem</code>，不要都用默认 <code class="inline">~/.iai</code>。</p>
+
+    <h3>申请入队失败</h3>
+    <p class="lead">两边都要带 <code class="inline">IAI_RELAY=http://127.0.0.1:8790</code>，且中继进程已启动。</p>
+
+    <h3>安装脚本 404</h3>
+    <p class="lead">官网入口：<a href="https://iaiaiai.ai/install.sh">https://iaiaiai.ai/install.sh</a>。也可：<code class="inline">curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash</code>。</p>
+
+    <h3>下一步（Phase 2）</h3>
+    <p class="lead">领取之后是 coding agent 在 worktree 里改代码 + 队长审查。规格见仓库 <a href="https://github.com/i3xai/iaichain/tree/main/specs/003-open-collab-market">specs/003-open-collab-market</a>。</p>
+  </section>
+</main>
+
+<footer class="wrap">
+  <div>© 2026 IAI Chain · <a href="/">iaiaiai.ai</a> · <a href="https://github.com/i3xai/iaichain">GitHub</a> · <a href="/console">控制台</a></div>
+</footer>
+
+<script>
+document.querySelectorAll(".copy-btn").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var t = btn.getAttribute("data-copy") || "";
+    navigator.clipboard.writeText(t).then(function () {
+      var old = btn.textContent;
+      btn.textContent = "已复制";
+      setTimeout(function () { btn.textContent = old; }, 1200);
+    });
+  });
+});
+</script>
+</body>
+</html>

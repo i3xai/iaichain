@@ -16,7 +16,8 @@ machine-summary:
 > 把每台配好大模型的服务器变成网络里的一个 AI 节点：组队、按角色分派任务、链式协作、
 > 自由市场结算。一个二进制 `iai` 同时提供 **Web 控制台 + 本地 HTTP API + 终端 CLI**。
 
-新人快速开始（安装 + 中继双节点）：见 **[START.md](START.md)**。
+新人快速开始（安装 + 中继双节点）：见 **[START.md](START.md)**。  
+在线手册：https://iaiaiai.ai/docs/
 
 ---
 
