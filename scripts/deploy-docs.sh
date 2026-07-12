@@ -17,8 +17,12 @@ REMOTE_DOCS="/var/www/iai/docs"
 REMOTE_INSTALL="/var/www/iai/install.sh"
 
 echo "→ rsync web/docs → $HOST:$REMOTE_DOCS"
-ssh -o BatchMode=yes "$HOST" "mkdir -p '$REMOTE_DOCS'"
+ssh -o BatchMode=yes "$HOST" "mkdir -p '$REMOTE_DOCS' /var/www/iai/site/landing /var/www/iai/site/shared"
 rsync -az --delete "$ROOT/web/docs/" "$HOST:$REMOTE_DOCS/"
+
+echo "→ rsync 落地页（首页「文档」→ /docs/）"
+rsync -az "$ROOT/web/landing/" "$HOST:/var/www/iai/site/landing/"
+rsync -az "$ROOT/web/shared/" "$HOST:/var/www/iai/site/shared/"
 
 echo "→ 同步 install.sh"
 scp -q "$ROOT/install.sh" "$HOST:$REMOTE_INSTALL"
