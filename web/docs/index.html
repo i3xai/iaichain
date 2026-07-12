@@ -35,6 +35,8 @@ nav{display:flex;align-items:center;gap:16px;height:58px}
 .nav-links{display:flex;gap:18px;margin-left:auto;flex-wrap:wrap}
 .nav-links a{color:var(--muted);font-size:13.5px}
 .nav-links a:hover{color:var(--fg)}
+.btn-home{display:inline-flex;align-items:center;gap:6px;margin-left:14px;border:1px solid var(--border-bright);border-radius:9px;padding:8px 14px;font-family:var(--font-display);font-size:13.5px;font-weight:600;color:var(--fg);background:transparent;white-space:nowrap;transition:.15s}
+.btn-home:hover{border-color:var(--accent);color:var(--accent)}
 .hero{padding:56px 0 28px}
 .hero h1{font-size:clamp(28px,5vw,42px);margin-bottom:12px}
 .hero p{color:var(--muted);max-width:640px}
@@ -68,7 +70,7 @@ footer{border-top:1px solid var(--border);padding:28px 0 48px;color:var(--faint)
 footer a{color:var(--muted)}
 .copy-btn{position:absolute;top:10px;right:10px;background:var(--surface-2);border:1px solid var(--border);color:var(--muted);border-radius:7px;padding:4px 8px;font-size:11px;font-family:var(--font-mono);cursor:pointer}
 .copy-btn:hover{color:var(--accent);border-color:var(--accent)}
-@media(max-width:720px){.nav-links{display:none}}
+@media(max-width:720px){.nav-links{display:none}.btn-home{margin-left:auto}}
 </style>
 </head>
 <body>
@@ -84,6 +86,7 @@ footer a{color:var(--muted)}
       <a href="#faq">FAQ</a>
       <a href="/console">控制台</a>
     </div>
+    <a class="btn-home" href="/">← 返回首页</a>
   </nav>
 </header>
 
@@ -99,6 +102,7 @@ footer a{color:var(--muted)}
       <a href="#claim">5. 领取任务</a>
       <a href="#faq">6. 常见问题</a>
     </div>
+    <p style="margin-top:20px"><a class="btn-home" href="/" style="margin-left:0">← 返回首页 iaiaiai.ai</a></p>
   </div>
 
   <section id="install">
