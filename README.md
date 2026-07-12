@@ -19,6 +19,14 @@
 
 ## 快速开始
 
+新人上手（下载 `iai`、中继 + 双节点演示）：见 **[START.md](START.md)**。
+
+一键安装预编译二进制（需 GitHub Release 已上传对应平台包）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash
+```
+
 ```sh
 # 构建
 cargo build --release            # 产出单二进制 target/release/iai

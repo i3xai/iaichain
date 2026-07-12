@@ -8,9 +8,13 @@
 #   scripts/publish.sh --upload                   # 自动 gh release create + upload（需 gh 已认证）
 #   scripts/publish.sh --docker-image rust:1.88-bookworm
 #
-# 资产命名（与 iai upgrade 命令对齐）：
+# 资产命名（与 iai upgrade 命令 / 根目录 install.sh 对齐）：
 #   dist/iai-v<TAG>-<TARGET>.tar.gz
 #   dist/iai-v<TAG>-<TARGET>.tar.gz.sha256
+#
+# 用户侧安装：
+#   curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash
+#   （需本脚本 --upload 或手动把 dist/* 挂到对应 Release）
 #
 # 跨平台说明：
 #   - host            —— 本机 cargo build（最快，需要本机 Rust 工具链）
