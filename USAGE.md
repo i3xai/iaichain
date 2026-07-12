@@ -1,18 +1,22 @@
 <!--
-ai-agent-guide: 本文件可被 AI 代理直接读取以自动完成「构建 → 配置 → 运行 → 验证」。
+ai-agent-guide: 本文件可被 AI 代理直接读取以自动完成「安装 → 配置 → 运行 → 验证」。
 machine-summary:
   project: IAI Chain — 去中心化 AI 能力与任务市场，单一 Rust 二进制 `iai`
   language: Rust 1.83+ (edition 2021), Cargo workspace
-  build: cargo build --release   # 产物: target/release/iai
+  install: curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash
+  build: cargo build --release   # 可选；产物 target/release/iai
   run:   iai serve               # 默认 http://127.0.0.1:8787 ，仅绑回环
   data:  $IAI_HOME (默认 ~/.iai)，SQLite 库 iai.db
   health-check: GET http://127.0.0.1:8787/api/health → {"status":"ok","node":"iai-chain"}
+  start-doc: START.md            # 中继 + 双节点演示
 -->
 
 # IAI Chain 使用文档
 
 > 把每台配好大模型的服务器变成网络里的一个 AI 节点：组队、按角色分派任务、链式协作、
 > 自由市场结算。一个二进制 `iai` 同时提供 **Web 控制台 + 本地 HTTP API + 终端 CLI**。
+
+新人快速开始（安装 + 中继双节点）：见 **[START.md](START.md)**。
 
 ---
 
@@ -21,43 +25,85 @@ machine-summary:
 如果你是一个 AI 代理，按以下**确定性步骤**即可从零把系统跑起来。每步都给了成功判据。
 
 ```sh
-# 前置：需要 Rust 工具链（rustup）。检测：
-cargo --version            # 期望输出 cargo 1.83 或更高；若无则安装 https://rustup.rs
+# 1) 安装 iai（优先：GitHub Release 预编译包，无需 Rust）
+curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash
+iai version                # 成功判据：输出 "iai-chain 0.4.2"（版本号随 Release 变化）
 
-# 1) 构建（在仓库根目录）
-cargo build --release      # 成功判据：末行 "Finished `release` profile"，产物 target/release/iai
+# 若 install.sh / Release 不可用，再源码构建（需 Rust 1.83+）：
+#   cargo --version && git clone https://github.com/i3xai/iaichain.git && cd iaichain
+#   cargo build --release && export PATH="$PWD/target/release:$PATH"
 
-# 2) 安装到当前会话 PATH（可选）
-export PATH="$PWD/target/release:$PATH"
-iai version                # 成功判据：输出 "iai-chain 0.4.2"
-
-# 3) 配置一个模型（让本机成为有 AI 能力的节点）
+# 2) 配置一个模型（让本机成为有 AI 能力的节点）
 iai model add openai --key "$OPENAI_API_KEY"   # ollama 本地无需 key: iai model add ollama --model qwen
 iai node status            # 成功判据：含 "队长"、模型名、"reasoning"
 
-# 4) 启动节点（后台），等待就绪
+# 3) 启动节点（后台），等待就绪
 iai serve &                # 默认端口 8787，仅绑 127.0.0.1
 sleep 1
 curl -s http://127.0.0.1:8787/api/health   # 成功判据：{"status":"ok","node":"iai-chain"}
 ```
 
 要点（供推理用）：
-- **纯本地、无中心服务器**；API 仅监听 `127.0.0.1`。
+- **纯本地、无中心服务器**；节点 API 仅监听 `127.0.0.1`（协调中继另见 START.md）。
 - 所有状态在 `$IAI_HOME`（默认 `~/.iai`）的 SQLite 库 `iai.db`；删库即重置。
 - 任务发起有**公开仓库守卫**：`--repo` 必须含 `github.com`，否则拒绝。
-- 当前任务执行用**确定性 MockProvider**（无外部调用、结果可复现）；接真实 LLM 见
-  [README 路线图](README.md#已知限制--路线图)。
+- 已有真实 LLM HTTP 适配（OpenAI / Anthropic / Ollama / MiniMax）；无 key 时可回退 Mock。
 - 命令既可走 **CLI**，也可走 **HTTP API**（见第 6 节）；两者操作同一个本地库。
 
 ---
 
 ## 1. 前置条件
 
-- **Rust 1.83+**（`rustup`）：https://rustup.rs
-- 平台：macOS / Linux / Windows
-- 无需数据库服务、无需网络中心服务（SQLite 已 bundled 进二进制）。
+- 平台：macOS / Linux（Windows 预编译包视 Release 资产而定）
+- **一键安装**：仅需 `curl`、`tar`；从 [Releases](https://github.com/i3xai/iaichain/releases) 拉对应平台包
+- **源码构建**（可选）：[Rust 1.83+](https://rustup.rs)
+- 无需数据库服务；节点侧无强制中心服务（SQLite 已 bundled）。多节点演示可起本地 `iai relay`。
 
-## 2. 构建与安装
+## 2. 安装
+
+### 2.1 一键安装（推荐）
+
+从 GitHub Releases 下载当前系统对应的预编译 `iai` 并装入 PATH：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash
+```
+
+常用选项：
+
+```sh
+# 指定版本（tag）
+curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash -s -- --version v0.4.2
+
+# 安装到自定义目录
+curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash -s -- --dir ~/.local/bin
+```
+
+脚本行为摘要：
+
+- 自动识别平台：`macos-aarch64` / `macos-x86_64` / `linux-x86_64` / `linux-aarch64`
+- 下载 `iai-v<VER>-<TARGET>.tar.gz`，有 `.sha256` 则校验
+- 默认装到可写的 `/usr/local/bin`，否则 `~/.local/bin`（必要时提示加入 PATH）
+
+验证：
+
+```sh
+iai version
+# 期望类似：iai-chain 0.4.2
+```
+
+> 若报 404：确认 `main` 上已有 [install.sh](https://github.com/i3xai/iaichain/blob/main/install.sh)，且对应 Release 含本机平台资产。  
+> 维护者上传包：`scripts/publish.sh --upload`。
+
+也可克隆仓库后本地执行：
+
+```sh
+git clone https://github.com/i3xai/iaichain.git
+cd iaichain
+bash install.sh --version v0.4.2
+```
+
+### 2.2 源码构建（开发 / 无预编译包时）
 
 ```sh
 # 在仓库根目录
@@ -71,6 +117,10 @@ cp target/release/iai /usr/local/bin/       # 永久（需写权限）
 
 验证：`iai version` → `iai-chain 0.4.2`。
 
+### 2.3 手动下载 Release
+
+打开 [Releases](https://github.com/i3xai/iaichain/releases)，下载 `iai-v*-<TARGET>.tar.gz`，解压后将其中的 `iai` 放到 PATH。
+
 ## 3. 五分钟上手
 
 ```sh
@@ -82,6 +132,8 @@ iai serve                              # 启动；浏览器打开 http://127.0.0
 - 控制台：`http://127.0.0.1:8787/console`
 
 不想开浏览器？所有功能都有等价 CLI（下一节）。
+
+多节点（中继 + 队长 + 队员）抄写命令见 [START.md](START.md)。
 
 ## 4. CLI 工作流
 
