@@ -1,8 +1,11 @@
 # IAI Chain 开发计划（从设计页面到可运行产品）
 
+> **2026-07-12 起**：产品规格与阶段闭环以 [`specs/003-open-collab-market`](specs/003-open-collab-market)
+> 与 [`specs/STATUS.md`](specs/STATUS.md) 为准（Phase 1 发布/入队/领取 → Phase 2 协作 → Phase 3 结算）。
+> 下文阶段 0–7 为历史实现记录，仍可对照；新工作不要仅按本节编号扩展。
+
 > 目标：把 `design/` 下两个设计页面（`index.html` 落地页、`console.html` 节点控制台）所展示的全部功能，
-> 逐步实现为**真实可运行的全栈产品** —— 前端保持「增强版原生 HTML/CSS/JS」，后端为 `specs/001-task-orchestration`
-> 规划的 Rust 四层节点引擎。
+> 逐步实现为**真实可运行的全栈产品** —— 前端保持「增强版原生 HTML/CSS/JS」，后端为 Rust 四层节点引擎。
 >
 > 本计划按**垂直切片**组织：每个阶段都产出一个可演示、可验收的成果，且严格衔接上一阶段，不留断头路。
 

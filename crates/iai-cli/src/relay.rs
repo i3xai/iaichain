@@ -1,13 +1,13 @@
-//! 协调中继（阶段 10b）：去中心化网络的**任务公告板 + 原子领取**。
+//! 协调中继（阶段 10b / Phase 1）：任务公告板 + 原子领取 + 入队申请板。
 //!
 //! 节点通过环境变量 `IAI_RELAY=http://<host>:<port>` 连接中继。中继只做发现/协商：
-//! 发布公告、拉取公告板、原子占位领取（防重复）。**记账仍各节点本地自治**，不经中继。
+//! 发布公告、拉取公告板、原子占位领取、入队申请与批准状态。**记账仍各节点本地自治**。
 //! 中继状态在内存（重启即清空，适合 demo / 单机多实例演示）。
 
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
@@ -42,9 +42,27 @@ pub struct TaskAd {
     pub slots: Vec<SlotAd>,
 }
 
+/// 入队申请公告（跨节点权威状态）。
+#[derive(Clone, Serialize, Deserialize)]
+pub struct JoinAd {
+    pub captain: String,
+    pub applicant: String,
+    #[serde(default = "default_role")]
+    pub role: String,
+    #[serde(default)]
+    pub model: String,
+    /// pending | approved | rejected
+    pub status: String,
+}
+
+fn default_role() -> String {
+    "开发".to_string()
+}
+
 #[derive(Default)]
 struct Board {
     tasks: Vec<TaskAd>,
+    joins: Vec<JoinAd>,
 }
 
 type Shared = Arc<Mutex<Board>>;
@@ -58,10 +76,13 @@ pub async fn serve_relay(port: u16) -> anyhow::Result<()> {
         .route("/relay/publish", post(publish))
         .route("/relay/board", get(board))
         .route("/relay/claim", post(claim))
+        .route("/relay/join", post(join_apply))
+        .route("/relay/joins", get(joins_list))
+        .route("/relay/join/decide", post(join_decide))
         .with_state(state);
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("IAI 协调中继已启动 http://{addr}  （任务公告板）");
+    tracing::info!("IAI 协调中继已启动 http://{addr}  （任务公告板 + 入队）");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -105,6 +126,95 @@ async fn claim(State(s): State<Shared>, Json(req): Json<ClaimReq>) -> (StatusCod
     (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "槽位不存在" })))
 }
 
+#[derive(Deserialize)]
+struct JoinApplyReq {
+    captain: String,
+    applicant: String,
+    #[serde(default = "default_role")]
+    role: String,
+    #[serde(default)]
+    model: String,
+}
+
+async fn join_apply(State(s): State<Shared>, Json(req): Json<JoinApplyReq>) -> Json<Value> {
+    let mut b = s.lock().unwrap();
+    if let Some(j) = b
+        .joins
+        .iter_mut()
+        .find(|j| j.captain == req.captain && j.applicant == req.applicant)
+    {
+        if j.status != "approved" {
+            j.role = req.role;
+            j.model = req.model;
+            j.status = "pending".into();
+        }
+    } else {
+        b.joins.push(JoinAd {
+            captain: req.captain,
+            applicant: req.applicant,
+            role: req.role,
+            model: req.model,
+            status: "pending".into(),
+        });
+    }
+    Json(json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct JoinsQuery {
+    captain: Option<String>,
+}
+
+async fn joins_list(State(s): State<Shared>, Query(q): Query<JoinsQuery>) -> Json<Value> {
+    let b = s.lock().unwrap();
+    let list: Vec<&JoinAd> = match q.captain.as_deref() {
+        Some(c) if !c.is_empty() => b.joins.iter().filter(|j| j.captain == c).collect(),
+        _ => b.joins.iter().collect(),
+    };
+    Json(serde_json::to_value(list).unwrap_or(Value::Array(vec![])))
+}
+
+#[derive(Deserialize)]
+struct JoinDecideReq {
+    captain: String,
+    applicant: String,
+    approve: bool,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+async fn join_decide(State(s): State<Shared>, Json(req): Json<JoinDecideReq>) -> (StatusCode, Json<Value>) {
+    let mut b = s.lock().unwrap();
+    let Some(j) = b
+        .joins
+        .iter_mut()
+        .find(|j| j.captain == req.captain && j.applicant == req.applicant)
+    else {
+        // 直接邀请：无申请也可写入 approved
+        if req.approve {
+            b.joins.push(JoinAd {
+                captain: req.captain,
+                applicant: req.applicant,
+                role: req.role.unwrap_or_else(default_role),
+                model: req.model.unwrap_or_default(),
+                status: "approved".into(),
+            });
+            return (StatusCode::OK, Json(json!({ "ok": true })));
+        }
+        return (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "申请不存在" })));
+    };
+    j.status = if req.approve { "approved" } else { "rejected" }.into();
+    if let Some(r) = req.role {
+        j.role = r;
+    }
+    if let Some(m) = req.model {
+        j.model = m;
+    }
+    (StatusCode::OK, Json(json!({ "ok": true })))
+}
+
 /* ---------- 节点侧客户端（连接中继） ---------- */
 
 /// 中继地址（`IAI_RELAY` 环境变量），未配置返回 None。
@@ -140,4 +250,76 @@ pub async fn claim_slot(url: &str, slot_id: &str, node: &str) -> anyhow::Result<
         .send()
         .await?;
     Ok(res.status().is_success())
+}
+
+pub async fn join_apply_remote(
+    url: &str,
+    captain: &str,
+    applicant: &str,
+    role: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    reqwest::Client::new()
+        .post(format!("{url}/relay/join"))
+        .json(&json!({
+            "captain": captain,
+            "applicant": applicant,
+            "role": role,
+            "model": model,
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+pub async fn fetch_joins(url: &str, captain: Option<&str>) -> anyhow::Result<Vec<JoinAd>> {
+    let mut req = reqwest::Client::new().get(format!("{url}/relay/joins"));
+    if let Some(c) = captain {
+        req = req.query(&[("captain", c)]);
+    }
+    let list = req.send().await?.json::<Vec<JoinAd>>().await?;
+    Ok(list)
+}
+
+pub async fn join_decide_remote(
+    url: &str,
+    captain: &str,
+    applicant: &str,
+    approve: bool,
+    role: Option<&str>,
+    model: Option<&str>,
+) -> anyhow::Result<()> {
+    reqwest::Client::new()
+        .post(format!("{url}/relay/join/decide"))
+        .json(&json!({
+            "captain": captain,
+            "applicant": applicant,
+            "approve": approve,
+            "role": role,
+            "model": model,
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+/// 申请人是否已被该队长批准（中继权威）。
+pub async fn is_approved_member(url: &str, captain: &str, applicant: &str) -> anyhow::Result<bool> {
+    let joins = fetch_joins(url, Some(captain)).await?;
+    Ok(joins
+        .iter()
+        .any(|j| j.applicant == applicant && j.status == "approved"))
+}
+
+/// 根据 slot_id 在公告板找到任务发布者。
+pub async fn publisher_of_slot(url: &str, slot_id: &str) -> anyhow::Result<Option<String>> {
+    let board = fetch_board(url).await?;
+    for t in board {
+        if t.slots.iter().any(|s| s.slot_id == slot_id) {
+            return Ok(Some(t.publisher));
+        }
+    }
+    Ok(None)
 }

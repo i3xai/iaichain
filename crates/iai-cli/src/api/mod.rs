@@ -108,6 +108,9 @@ pub fn router() -> Router {
         .route("/api/team", get(team))
         .route("/api/team/recruit", post(team_recruit))
         .route("/api/team/invite", post(team_invite))
+        .route("/api/team/join", post(team_join))
+        .route("/api/team/join-requests", get(team_join_requests))
+        .route("/api/team/join-requests/decide", post(team_join_decide))
         .route("/api/network", get(network))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/:id", get(task_detail))
@@ -437,6 +440,7 @@ struct InviteReq {
 /// POST /api/team/invite —— 邀请 / 登记成员节点。
 async fn team_invite(Json(req): Json<InviteReq>) -> ApiResult {
     let conn = storage::open_conn().map_err(err500)?;
+    let captain = storage::ensure_node(&conn).map_err(err500)?;
     storage::invite_member(
         &conn,
         &req.node,
@@ -446,7 +450,153 @@ async fn team_invite(Json(req): Json<InviteReq>) -> ApiResult {
         req.online.unwrap_or(true),
     )
     .map_err(err500)?;
+    let _ = storage::mark_join_approved(&conn, &captain, &req.node, &req.role, &req.model);
+    // 同步中继批准态，便于跨节点领取鉴权（FR-107）
+    if let Some(url) = relay::relay_url() {
+        let _ = relay::join_decide_remote(
+            &url,
+            &captain,
+            &req.node,
+            true,
+            Some(&req.role),
+            Some(&req.model),
+        )
+        .await;
+    }
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct JoinReq {
+    /// 队长节点 id（申请人填写）
+    #[serde(rename = "captainNodeId")]
+    captain_node_id: String,
+    role: Option<String>,
+    model: Option<String>,
+}
+
+/// POST /api/team/join —— 申请加入某队长团队（写入中继 + 本地镜像）。
+async fn team_join(Json(req): Json<JoinReq>) -> ApiResult {
+    let captain = req.captain_node_id.trim();
+    if captain.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 captainNodeId" }))));
+    }
+    let conn = storage::open_conn().map_err(err500)?;
+    let applicant = storage::ensure_node(&conn).map_err(err500)?;
+    if applicant == captain {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "不能申请加入自己的团队" }))));
+    }
+    let role = req.role.unwrap_or_else(|| "开发".into());
+    let model = req
+        .model
+        .or_else(|| storage::self_model(&conn).ok())
+        .unwrap_or_default();
+    storage::upsert_join_request(&conn, captain, &applicant, &role, &model).map_err(err500)?;
+    let url = relay::relay_url().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "未配置中继 IAI_RELAY，无法跨节点申请入队" })),
+        )
+    })?;
+    relay::join_apply_remote(&url, captain, &applicant, &role, &model)
+        .await
+        .map_err(err500)?;
+    Ok(Json(json!({ "ok": true, "status": "pending" })))
+}
+
+/// GET /api/team/join-requests —— 队长查看申请（中继优先，并镜像本地）。
+async fn team_join_requests() -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let captain = storage::ensure_node(&conn).map_err(err500)?;
+    let mut items: Vec<Value> = Vec::new();
+    if let Some(url) = relay::relay_url() {
+        if let Ok(remote) = relay::fetch_joins(&url, Some(&captain)).await {
+            for j in remote {
+                match j.status.as_str() {
+                    "approved" => {
+                        let _ = storage::mark_join_approved(
+                            &conn, &j.captain, &j.applicant, &j.role, &j.model,
+                        );
+                    }
+                    "pending" => {
+                        let _ = storage::upsert_join_request(
+                            &conn, &j.captain, &j.applicant, &j.role, &j.model,
+                        );
+                    }
+                    _ => {}
+                }
+                items.push(json!({
+                    "captainNodeId": j.captain,
+                    "applicantNodeId": j.applicant,
+                    "role": j.role,
+                    "model": j.model,
+                    "status": j.status,
+                }));
+            }
+        }
+    }
+    if items.is_empty() {
+        for r in storage::list_join_requests(&conn, &captain).map_err(err500)? {
+            items.push(json!({
+                "captainNodeId": r.captain_node,
+                "applicantNodeId": r.applicant_node,
+                "role": r.role,
+                "model": r.model,
+                "status": r.status,
+                "createdAt": r.created_at,
+            }));
+        }
+    }
+    Ok(Json(json!({ "requests": items })))
+}
+
+#[derive(Deserialize)]
+struct JoinDecideBody {
+    #[serde(rename = "applicantNodeId")]
+    applicant_node_id: String,
+    approve: bool,
+    role: Option<String>,
+    model: Option<String>,
+}
+
+/// POST /api/team/join-requests/decide —— 队长批准/拒绝。
+async fn team_join_decide(Json(req): Json<JoinDecideBody>) -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    let captain = storage::ensure_node(&conn).map_err(err500)?;
+    let applicant = req.applicant_node_id.trim();
+    if applicant.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 applicantNodeId" }))));
+    }
+    // 若本地无记录，先从中继拉一条镜像
+    if let Some(url) = relay::relay_url() {
+        if let Ok(remote) = relay::fetch_joins(&url, Some(&captain)).await {
+            if let Some(j) = remote.iter().find(|j| j.applicant == applicant) {
+                let _ = storage::upsert_join_request(&conn, &captain, applicant, &j.role, &j.model);
+            }
+        }
+    }
+    storage::decide_join_request(
+        &conn,
+        &captain,
+        applicant,
+        req.approve,
+        req.role.as_deref(),
+        req.model.as_deref(),
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))))?;
+    if let Some(url) = relay::relay_url() {
+        relay::join_decide_remote(
+            &url,
+            &captain,
+            applicant,
+            req.approve,
+            req.role.as_deref(),
+            req.model.as_deref(),
+        )
+        .await
+        .map_err(err500)?;
+    }
+    Ok(Json(json!({ "ok": true, "approve": req.approve })))
 }
 
 /* ---------- 阶段 5：任务编排 ---------- */
@@ -906,6 +1056,24 @@ async fn network_claim(Json(req): Json<NetClaimReq>) -> ApiResult {
         let c = storage::open_conn().map_err(err500)?;
         storage::ensure_node(&c).map_err(err500)?
     };
+    // FR-107：未批准成员不得领取（发布者本人除外）
+    let publisher = relay::publisher_of_slot(&url, &req.slot_id)
+        .await
+        .map_err(err500)?;
+    let Some(publisher) = publisher else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "槽位不存在" }))));
+    };
+    if publisher != self_id {
+        let ok = relay::is_approved_member(&url, &publisher, &self_id)
+            .await
+            .map_err(err500)?;
+        if !ok {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "未加入该队长团队或申请尚未批准，无法领取" })),
+            ));
+        }
+    }
     let ok = relay::claim_slot(&url, &req.slot_id, &self_id).await.map_err(err500)?;
     if ok {
         Ok(Json(json!({ "ok": true })))
@@ -929,6 +1097,11 @@ pub async fn auto_match_once() -> anyhow::Result<Option<String>> {
     let mut best: Option<(i64, String, String)> = None; // (reward, slot_id, model)
     for t in &board {
         if t.publisher == self_id {
+            continue;
+        }
+        // 仅匹配已批准加入该队长团队的任务
+        let approved = relay::is_approved_member(&url, &t.publisher, &self_id).await.unwrap_or(false);
+        if !approved {
             continue;
         }
         for slot in &t.slots {

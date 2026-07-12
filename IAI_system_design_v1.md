@@ -1,5 +1,8 @@
 # IAI 系统技术设计文档（V1）
 
+> **状态**：愿景摘要。当前产品规格真源为 [`specs/003-open-collab-market`](specs/003-open-collab-market)
+>（索引 [`specs/STATUS.md`](specs/STATUS.md)）。冲突时以 003 与章程 v1.1 为准。
+
 ## 1. 项目概述
 
 IAI 是一个去中心化的 AI

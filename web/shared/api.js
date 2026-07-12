@@ -205,6 +205,25 @@ export async function inviteMember(body) {
   return postJSON("/api/team/invite", body);
 }
 
+/** 申请加入队长团队：POST /api/team/join { captainNodeId, role?, model? }。 */
+export async function applyJoinTeam(body) {
+  return postJSON("/api/team/join", body);
+}
+
+/** 队长查看入队申请：GET /api/team/join-requests → { requests: [...] }。 */
+export async function getJoinRequests() {
+  try {
+    return await getJSON("/api/team/join-requests");
+  } catch {
+    return { requests: [] };
+  }
+}
+
+/** 批准/拒绝入队：POST /api/team/join-requests/decide。 */
+export async function decideJoinRequest(body) {
+  return postJSON("/api/team/join-requests/decide", body);
+}
+
 /* ───────────── 阶段 2：已对接真实后端（钱包 / 账本） ───────────── */
 
 /** 钱包视图。返回 { balance, locked, weekly, lockedTasks, weeklyAccepted }。 */

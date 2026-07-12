@@ -361,7 +361,18 @@
 
       <!-- TEAM -->
       <section class="view" data-view="team">
-        <div class="view-head"><div><h1>团队成员节点</h1><p>队长与队员都需配置大模型，才是具备 AI 能力的节点。</p></div><button class="btn btn-ghost">+ 招募 / 邀请</button></div>
+        <div class="view-head"><div><h1>团队成员节点</h1><p>队员申请入队，队长批准后方可领取网络任务。</p></div>
+          <button class="btn btn-ghost" id="btnTeamPanel" type="button">申请 / 审批</button>
+        </div>
+        <div class="card deep" id="teamJoinPanel" style="display:none;margin-bottom:14px">
+          <h3 style="margin:0 0 10px">申请加入团队</h3>
+          <div class="fld"><span>队长节点 ID</span><input id="joinCaptainId" placeholder="node.xxxx" autocomplete="off"></div>
+          <div class="fld"><span>角色</span><input id="joinRole" value="开发" autocomplete="off"></div>
+          <button class="btn" id="btnApplyJoin" type="button" style="margin-top:8px">提交申请</button>
+          <p class="stat-sub" id="joinApplyMsg" style="margin-top:8px"></p>
+          <h3 style="margin:18px 0 10px">待审批申请</h3>
+          <div id="joinReqList" class="empty" style="padding:4px 0">加载中…</div>
+        </div>
         <div class="card deep">
           <table class="members"><thead><tr><th>节点</th><th>角色</th><th>模型</th><th>状态</th><th>累计贡献</th></tr></thead><tbody id="teamBody"></tbody></table>
         </div>

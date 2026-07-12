@@ -77,10 +77,13 @@ cargo test --workspace
 ## 已知限制 / 路线图
 
 - **模型 key 当前明文落库** —— 计划接 keyring / 加密存储。
-- **任务执行用确定性 MockProvider**（可复现、无外部依赖）—— 真实 OpenAI/Anthropic/Ollama
-  的 HTTP 适配已通过 `ModelProvider` trait 预留契约，待接入。
+- **Coding agent 工具环尚未完整** —— 已有真实 LLM HTTP 适配与 worktree 提交；完整读/写/跑命令
+  工具环见规格 Phase 2（`specified`/`partial`）。
+- **质量门禁仍为确定性伪评分** —— 行为契约保留；裁判模型/队长 agent 审查见 Phase 2/3。
+- **开放入队申请审批与防刷基线** —— 见规格 Phase 1 / Phase 3。
 - **实时刷新用前端轮询**（运行中任务 2s）—— 计划升级为 SSE/WebSocket 推送。
 - **跨平台 release** 二进制打包（macOS/Linux/Windows）由 CI 产出。
 
-详见 [DEVELOPMENT-PLAN.md](DEVELOPMENT-PLAN.md)（阶段 0–7 增量计划）与
-[specs/001-task-orchestration](specs/001-task-orchestration)（规格与契约）。
+交付按三闭环推进：**发布入队领取 → 协作执行 → 结算市场**。  
+当前规格真源：[specs/003-open-collab-market](specs/003-open-collab-market) · 索引 [specs/STATUS.md](specs/STATUS.md)。  
+历史阶段 0–7 记录：[DEVELOPMENT-PLAN.md](DEVELOPMENT-PLAN.md)。

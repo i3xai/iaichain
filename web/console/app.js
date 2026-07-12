@@ -7,6 +7,7 @@ import {
   getTeam, getLedger, getVersion, getNode, getWallet, getNetwork, authLogout,
   checkRepo, composeTask, getTask, getTaskLog, getModelInstances,
   getNetworkTasks, claimSlot, autoMatch, getHosted, setHosted,
+  applyJoinTeam, getJoinRequests, decideJoinRequest,
 } from "/shared/api.js";
 
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -54,6 +55,7 @@ export async function init() {
   bindTaskModal();
   bindTaskDetail();
   bindNetwork();
+  wireTeamJoin();
 }
 
 /* ───────────── 任务详情弹框（阶段 9：角色槽 + 贡献分 + 操作日志） ───────────── */
@@ -419,6 +421,74 @@ function renderTeam() {
     var av = m[0].indexOf("captain") > -1 ? "C" : m[0].slice(5, 7).toUpperCase();
     tb.innerHTML += '<tr><td><div class="who"><span class="av">' + av + '</span><span class="mono">' + m[0] + '</span></div></td><td><span class="tag role">' + m[1] + '</span></td><td class="qty">' + m[2] + '</td><td><span class="dot-s ' + (m[3] ? "on" : "off") + '"></span>' + (m[3] ? "在线" : "离线") + '</td><td class="px tnum">' + m[4] + "</td></tr>";
   });
+}
+
+async function refreshJoinRequests() {
+  var box = document.getElementById("joinReqList");
+  if (!box) return;
+  try {
+    var data = await getJoinRequests();
+    var reqs = (data && data.requests) || [];
+    var pending = reqs.filter(function (r) { return r.status === "pending"; });
+    if (!pending.length) {
+      box.className = "empty";
+      box.style.padding = "4px 0";
+      box.textContent = "暂无待审批申请";
+      return;
+    }
+    box.className = "";
+    box.innerHTML = pending.map(function (r) {
+      return '<div class="aslot" style="margin:6px 0">' +
+        '<span class="mono">' + r.applicantNodeId + '</span>' +
+        '<span class="tag role">' + (r.role || "开发") + '</span>' +
+        '<button class="btn btn-ghost join-approve" data-node="' + r.applicantNodeId + '" style="margin-left:auto;padding:4px 10px;font-size:11px">批准</button>' +
+        '<button class="btn btn-ghost join-reject" data-node="' + r.applicantNodeId + '" style="padding:4px 10px;font-size:11px">拒绝</button></div>';
+    }).join("");
+  } catch (e) {
+    box.textContent = "加载失败：" + (e.message || e);
+  }
+}
+
+function wireTeamJoin() {
+  var panel = document.getElementById("teamJoinPanel");
+  var btn = document.getElementById("btnTeamPanel");
+  if (btn && panel) {
+    btn.addEventListener("click", function () {
+      var on = panel.style.display !== "none";
+      panel.style.display = on ? "none" : "block";
+      if (!on) refreshJoinRequests();
+    });
+  }
+  var applyBtn = document.getElementById("btnApplyJoin");
+  if (applyBtn) {
+    applyBtn.addEventListener("click", async function () {
+      var msg = document.getElementById("joinApplyMsg");
+      var captain = (document.getElementById("joinCaptainId") || {}).value || "";
+      var role = (document.getElementById("joinRole") || {}).value || "开发";
+      try {
+        await applyJoinTeam({ captainNodeId: captain.trim(), role: role.trim() });
+        if (msg) msg.textContent = "已提交申请，等待队长批准";
+      } catch (e) {
+        if (msg) msg.textContent = e.message || String(e);
+      }
+    });
+  }
+  var list = document.getElementById("joinReqList");
+  if (list) {
+    list.addEventListener("click", async function (e) {
+      var a = e.target.closest(".join-approve");
+      var r = e.target.closest(".join-reject");
+      var node = (a || r) && (a || r).getAttribute("data-node");
+      if (!node) return;
+      try {
+        await decideJoinRequest({ applicantNodeId: node, approve: !!a });
+        await refreshJoinRequests();
+        try { team = await getTeam(); renderTeam(); } catch (_) {}
+      } catch (err) {
+        alert(err.message || String(err));
+      }
+    });
+  }
 }
 
 /* ───────────── ledger ───────────── */

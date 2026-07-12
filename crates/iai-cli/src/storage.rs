@@ -328,6 +328,25 @@ fn apply_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.execute("INSERT INTO schema_migrations (version) VALUES (10)", [])?;
     }
 
+    // v11：入队申请（Phase 1 JoinRequest；中继为跨节点权威，本地为审计镜像）。
+    if applied < 11 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS join_request (
+                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                 captain_node    TEXT NOT NULL,
+                 applicant_node  TEXT NOT NULL,
+                 role            TEXT NOT NULL DEFAULT '开发',
+                 model           TEXT NOT NULL DEFAULT '',
+                 status          TEXT NOT NULL DEFAULT 'pending',
+                 created_at      TEXT NOT NULL DEFAULT (datetime('now','+8 hours')),
+                 decided_at      TEXT,
+                 UNIQUE(captain_node, applicant_node)
+             );",
+        )
+        .context("应用迁移 v11 失败")?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (11)", [])?;
+    }
+
     Ok(())
 }
 
@@ -644,7 +663,7 @@ pub fn list_price_points(conn: &Connection, limit: u32) -> anyhow::Result<Vec<i6
 /* ---------- 阶段 4：团队与注册表 ---------- */
 
 /// 本机首个已配置模型的展示名（无则「未配置」）。
-fn self_model(conn: &Connection) -> anyhow::Result<String> {
+pub(crate) fn self_model(conn: &Connection) -> anyhow::Result<String> {
     Ok(list_models(conn)?
         .first()
         .map(|m| m.label.clone())
@@ -690,6 +709,134 @@ pub fn invite_member(
          ON CONFLICT(node_id) DO UPDATE SET role=excluded.role, model=excluded.model,
              online=excluded.online, credits=excluded.credits",
         params![node_id, role, model, online as i64, credits],
+    )?;
+    Ok(())
+}
+
+/// 本机团队是否已包含该节点（含本机自己）。
+pub fn is_team_member(conn: &Connection, node_id: &str) -> anyhow::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM team_member WHERE node_id = ?1",
+        params![node_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// 入队申请（本地镜像）。
+#[derive(Debug, Clone)]
+pub struct JoinRequestRow {
+    pub id: i64,
+    pub captain_node: String,
+    pub applicant_node: String,
+    pub role: String,
+    pub model: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+/// 提交或刷新入队申请为 pending（幂等：已 approved 保持不动）。
+pub fn upsert_join_request(
+    conn: &Connection,
+    captain: &str,
+    applicant: &str,
+    role: &str,
+    model: &str,
+) -> anyhow::Result<i64> {
+    let existing: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, status FROM join_request WHERE captain_node = ?1 AND applicant_node = ?2",
+            params![captain, applicant],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    if let Some((id, status)) = existing {
+        if status == "approved" {
+            return Ok(id);
+        }
+        conn.execute(
+            "UPDATE join_request SET role = ?1, model = ?2, status = 'pending', decided_at = NULL
+             WHERE id = ?3",
+            params![role, model, id],
+        )?;
+        return Ok(id);
+    }
+    conn.execute(
+        "INSERT INTO join_request (captain_node, applicant_node, role, model, status)
+         VALUES (?1, ?2, ?3, ?4, 'pending')",
+        params![captain, applicant, role, model],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// 队长侧：列出本地 pending（及全部，供 UI）。
+pub fn list_join_requests(conn: &Connection, captain: &str) -> anyhow::Result<Vec<JoinRequestRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, captain_node, applicant_node, role, model, status, created_at
+         FROM join_request WHERE captain_node = ?1
+         ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, id DESC",
+    )?;
+    let rows = stmt
+        .query_map(params![captain], |r| {
+            Ok(JoinRequestRow {
+                id: r.get(0)?,
+                captain_node: r.get(1)?,
+                applicant_node: r.get(2)?,
+                role: r.get(3)?,
+                model: r.get(4)?,
+                status: r.get(5)?,
+                created_at: r.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 决定入队申请；approve 时同步写入 team_member。
+pub fn decide_join_request(
+    conn: &Connection,
+    captain: &str,
+    applicant: &str,
+    approve: bool,
+    role: Option<&str>,
+    model: Option<&str>,
+) -> anyhow::Result<()> {
+    let row: (i64, String, String) = conn
+        .query_row(
+            "SELECT id, role, model FROM join_request
+             WHERE captain_node = ?1 AND applicant_node = ?2",
+            params![captain, applicant],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .context("入队申请不存在")?;
+    let status = if approve { "approved" } else { "rejected" };
+    conn.execute(
+        "UPDATE join_request SET status = ?1, decided_at = datetime('now','+8 hours') WHERE id = ?2",
+        params![status, row.0],
+    )?;
+    if approve {
+        let r = role.unwrap_or(&row.1);
+        let m = model.unwrap_or(&row.2);
+        invite_member(conn, applicant, r, m, 0, true)?;
+    }
+    Ok(())
+}
+
+/// 将直接邀请记为已批准的入队记录（无申请时补镜像）。
+pub fn mark_join_approved(
+    conn: &Connection,
+    captain: &str,
+    applicant: &str,
+    role: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO join_request (captain_node, applicant_node, role, model, status, decided_at)
+         VALUES (?1, ?2, ?3, ?4, 'approved', datetime('now','+8 hours'))
+         ON CONFLICT(captain_node, applicant_node) DO UPDATE SET
+             role=excluded.role, model=excluded.model, status='approved',
+             decided_at=excluded.decided_at",
+        params![captain, applicant, role, model],
     )?;
     Ok(())
 }
@@ -1456,4 +1603,47 @@ pub fn list_stale_working(
         .query_map(params![seconds], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn join_request_approve_adds_member() {
+        let conn = mem();
+        upsert_join_request(&conn, "cap.1", "node.a", "后端", "gpt").unwrap();
+        let pending = list_join_requests(&conn, "cap.1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].status, "pending");
+        decide_join_request(&conn, "cap.1", "node.a", true, None, None).unwrap();
+        assert!(is_team_member(&conn, "node.a").unwrap());
+        let after = list_join_requests(&conn, "cap.1").unwrap();
+        assert_eq!(after[0].status, "approved");
+    }
+
+    #[test]
+    fn join_request_reject_keeps_out() {
+        let conn = mem();
+        upsert_join_request(&conn, "cap.1", "node.b", "测试", "ds").unwrap();
+        decide_join_request(&conn, "cap.1", "node.b", false, None, None).unwrap();
+        assert!(!is_team_member(&conn, "node.b").unwrap());
+    }
+
+    #[test]
+    fn mark_join_approved_idempotent() {
+        let conn = mem();
+        mark_join_approved(&conn, "cap.1", "node.c", "开发", "m").unwrap();
+        mark_join_approved(&conn, "cap.1", "node.c", "开发", "m2").unwrap();
+        let rows = list_join_requests(&conn, "cap.1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "approved");
+        assert_eq!(rows[0].model, "m2");
+    }
 }
