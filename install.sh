@@ -22,6 +22,8 @@ VERSION="${IAI_VERSION:-}"
 INSTALL_DIR="${IAI_INSTALL_DIR:-}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB_DL="${GITHUB_DL:-https://github.com}"
+# 官网静态镜像（publish 同步 dist/）；也可用 IAI_DOWNLOAD_MIRROR 覆盖加速前缀
+OFFICIAL_MIRROR="${IAI_OFFICIAL_MIRROR:-https://iaiaiai.ai/releases}"
 
 usage() {
   sed -n '2,18p' "$0"
@@ -151,17 +153,42 @@ echo "Asset:   $ASSET"
 echo "Install: $INSTALL_DIR/iai"
 echo
 
-echo "↓ 下载 $URL"
-if ! curl -fsSL "$URL" -o "$TMP/$ASSET"; then
-  echo "下载失败。请检查 Release 是否包含 $ASSET：" >&2
+echo "↓ 下载 $ASSET"
+download_ok=0
+CANDIDATES=()
+if [ -n "${IAI_DOWNLOAD_MIRROR:-}" ]; then
+  CANDIDATES+=("${IAI_DOWNLOAD_MIRROR%/}/$REPO/releases/download/${TAG}/${ASSET}")
+fi
+CANDIDATES+=("$OFFICIAL_MIRROR/$ASSET")
+CANDIDATES+=("https://ghfast.top/https://github.com/$REPO/releases/download/${TAG}/${ASSET}")
+CANDIDATES+=("https://ghproxy.net/https://github.com/$REPO/releases/download/${TAG}/${ASSET}")
+CANDIDATES+=("$URL")
+
+for u in "${CANDIDATES[@]}"; do
+  echo "  → $u"
+  if curl -fsSL --connect-timeout 15 --max-time 180 "$u" -o "$TMP/$ASSET"; then
+    download_ok=1
+    URL="$u"  # 同前缀拉 sha256
+    break
+  fi
+done
+if [ "$download_ok" != 1 ]; then
+  echo "下载失败。请检查 Release 是否包含 $ASSET，或设置 IAI_DOWNLOAD_MIRROR：" >&2
   echo "  https://github.com/$REPO/releases/tag/$TAG" >&2
-  echo "维护者可用: scripts/publish.sh --upload" >&2
+  echo "  IAI_DOWNLOAD_MIRROR=https://ghfast.top/https://github.com bash install.sh" >&2
   exit 1
 fi
 
-if curl -fsSL "$SHA_URL" -o "$TMP/$ASSET.sha256" 2>/dev/null; then
-  verify_sha256 "$TMP/$ASSET" "$TMP/$ASSET.sha256"
-else
+# sha：优先同目录镜像，再试 GitHub
+SHA_OK=0
+for su in "$OFFICIAL_MIRROR/$ASSET.sha256" "${URL}.sha256" "$SHA_URL"; do
+  if curl -fsSL --connect-timeout 10 --max-time 60 "$su" -o "$TMP/$ASSET.sha256" 2>/dev/null; then
+    verify_sha256 "$TMP/$ASSET" "$TMP/$ASSET.sha256"
+    SHA_OK=1
+    break
+  fi
+done
+if [ "$SHA_OK" != 1 ]; then
   echo "⚠ 未下载到 .sha256，跳过校验"
 fi
 

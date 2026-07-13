@@ -84,10 +84,109 @@ fn asset_name(tag: &str, target: &str) -> String {
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(format!("iai-cli/{}", current_version()))
-        .timeout(std::time::Duration::from_secs(30))
-        .connect_timeout(std::time::Duration::from_secs(10))
+        // 大文件 + 弱网：拉长超时；重定向默认跟随（GitHub → release-assets）
+        .timeout(std::time::Duration::from_secs(180))
+        .connect_timeout(std::env::var("IAI_CONNECT_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map(std::time::Duration::from_secs)
+            .unwrap_or_else(|| std::time::Duration::from_secs(20)))
+        .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .expect("构建 HTTP client 失败")
+}
+
+/// 官网静态镜像（publish.sh 会同步 dist/ 到此路径）。
+const OFFICIAL_MIRROR: &str = "https://iaiaiai.ai/releases";
+
+/// 为 GitHub 资源生成候选下载 URL（官网镜像优先，规避 github.com TLS 不稳）。
+fn download_candidates(github_url: &str, asset_file: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    // 自定义前缀：IAI_DOWNLOAD_MIRROR=https://ghfast.top/https://github.com
+    if let Ok(mirror) = std::env::var("IAI_DOWNLOAD_MIRROR") {
+        let m = mirror.trim_end_matches('/');
+        if !m.is_empty() {
+            if github_url.starts_with("https://github.com/") {
+                urls.push(format!(
+                    "{m}/{}",
+                    github_url.trim_start_matches("https://github.com/")
+                ));
+            } else {
+                urls.push(format!("{m}/{asset_file}"));
+            }
+        }
+    }
+    // 官网静态镜像（国内可达）
+    urls.push(format!("{OFFICIAL_MIRROR}/{asset_file}"));
+    // 公共 GitHub 加速
+    if github_url.starts_with("https://github.com/") {
+        let rest = github_url.trim_start_matches("https://github.com/");
+        urls.push(format!("https://ghfast.top/https://github.com/{rest}"));
+        urls.push(format!("https://ghproxy.net/https://github.com/{rest}"));
+    }
+    // 直连 GitHub（海外 / 网络正常时）
+    urls.push(github_url.to_string());
+    let mut seen = std::collections::HashSet::new();
+    urls.retain(|u| seen.insert(u.clone()));
+    urls
+}
+
+async fn download_to_with_mirrors(primary: &str, dst: &Path, asset_file: Option<&str>) -> Result<()> {
+    let name = asset_file.map(|s| s.to_string()).unwrap_or_else(|| {
+        primary
+            .rsplit('/')
+            .next()
+            .unwrap_or("download.bin")
+            .to_string()
+    });
+    let candidates = download_candidates(primary, &name);
+    let mut last_err = anyhow!("无可用下载源");
+    for (i, url) in candidates.iter().enumerate() {
+        for attempt in 1..=2 {
+            if i > 0 || attempt > 1 {
+                println!("  ↻ 尝试 {} (#{attempt})", url);
+            } else {
+                println!("  → {}", url);
+            }
+            match download_once(url, dst).await {
+                Ok(()) => {
+                    if i > 0 {
+                        println!("✓ 已从镜像下载");
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_err = e;
+                    if attempt < 2 {
+                        tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64))
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+    Err(last_err).with_context(|| {
+        format!(
+            "下载 {name} 失败（已尝试 {} 个源）。可设置 IAI_DOWNLOAD_MIRROR，或：\n  curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --version <tag>",
+            candidates.len()
+        )
+    })
+}
+
+async fn download_once(url: &str, dst: &Path) -> Result<()> {
+    let resp = client()
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url} 失败"))?
+        .error_for_status()
+        .with_context(|| format!("下载 {url} 返回错误状态"))?;
+    let bytes = resp.bytes().await.context("读取下载内容失败")?;
+    if bytes.len() < 1_000 {
+        bail!("下载内容过小（{} bytes），疑似错误页：{url}", bytes.len());
+    }
+    std::fs::write(dst, &bytes).with_context(|| format!("写入 {} 失败", dst.display()))?;
+    Ok(())
 }
 
 async fn fetch_release(tag: Option<&str>) -> Result<ReleaseResp> {
@@ -221,17 +320,18 @@ pub async fn run(target_version: Option<String>, yes: bool, no_restart: bool) ->
         .with_context(|| format!("创建临时目录失败: {}", tmpdir.display()))?;
     let tar_path = tmpdir.join(&asset.name);
 
-    // 5. 下载
+    // 5. 下载（直连失败则走官网镜像 / 公共加速）
     println!("↓ 下载 {}", asset.name);
-    download_to(&asset.browser_download_url, &tar_path)
+    download_to_with_mirrors(&asset.browser_download_url, &tar_path, Some(&asset.name))
         .await
-        .with_context(|| format!("下载 {} 失败", asset.browser_download_url))?;
+        .with_context(|| format!("下载 {} 失败", asset.name))?;
 
     // 6. SHA256 校验
     if let Some(sha_a) = sha_asset {
         let sha_path = tmpdir.join(&sha_a.name);
         println!("↓ 下载 {}", sha_a.name);
-        download_to(&sha_a.browser_download_url, &sha_path).await?;
+        download_to_with_mirrors(&sha_a.browser_download_url, &sha_path, Some(&sha_a.name))
+            .await?;
         let expected = parse_sha256_file(&sha_path)?;
         let actual = sha256_file(&tar_path)?;
         if !expected.eq_ignore_ascii_case(&actual) {
@@ -311,19 +411,6 @@ pub async fn run(target_version: Option<String>, yes: bool, no_restart: bool) ->
     let _ = std::fs::remove_dir_all(&tmpdir);
     println!();
     println!("✅ 升级完成 v{cur} → v{want_ver}（旧版保留为 {}）", bak_path.display());
-    Ok(())
-}
-
-async fn download_to(url: &str, dst: &Path) -> Result<()> {
-    let resp = client()
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url} 失败"))?
-        .error_for_status()
-        .with_context(|| format!("下载 {url} 返回错误状态"))?;
-    let bytes = resp.bytes().await.context("读取下载内容失败")?;
-    std::fs::write(dst, &bytes).with_context(|| format!("写入 {} 失败", dst.display()))?;
     Ok(())
 }
 

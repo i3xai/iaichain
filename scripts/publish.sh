@@ -255,6 +255,53 @@ $(ls dist/ | sed 's/^/- /')
     gh release create "$TAG" dist/* --title "$TAG" --notes "$notes"
   fi
   echo "✓ 完成：https://github.com/i3xai/iaichain/releases/tag/$TAG"
+
+  # 同步到官网静态镜像，供国内 iai upgrade / install.sh 回退下载
+  MIRROR_HOST="${IAI_MIRROR_HOST:-root@139.224.28.252}"
+  MIRROR_DIR="${IAI_MIRROR_DIR:-/var/www/iai/releases}"
+  if command -v rsync >/dev/null 2>&1 && ssh -o BatchMode=yes -o ConnectTimeout=8 "$MIRROR_HOST" "true" 2>/dev/null; then
+    echo "→ 同步 dist/ → $MIRROR_HOST:$MIRROR_DIR/"
+    ssh -o BatchMode=yes "$MIRROR_HOST" "mkdir -p '$MIRROR_DIR'"
+    rsync -az dist/ "$MIRROR_HOST:$MIRROR_DIR/"
+    # nginx /releases/
+    ssh -o BatchMode=yes "$MIRROR_HOST" 'bash -s' <<'REMOTE'
+set -euo pipefail
+CONF=/etc/nginx/sites-available/iai
+if ! grep -q 'location /releases/' "$CONF" 2>/dev/null; then
+  python3 - <<'PY'
+from pathlib import Path
+p = Path("/etc/nginx/sites-available/iai")
+text = p.read_text()
+snippet = """
+    location /releases/ {
+        alias /var/www/iai/releases/;
+        add_header Cache-Control "public, max-age=3600";
+        autoindex off;
+    }
+"""
+if "location /releases/" in text:
+    raise SystemExit(0)
+needle = "    location /docs/"
+if needle in text:
+    text = text.replace(needle, snippet + "\n" + needle, 1)
+else:
+    needle2 = "    location / {"
+    if needle2 not in text:
+        raise SystemExit("未找到 nginx 插入点")
+    text = text.replace(needle2, snippet + "\n" + needle2, 1)
+p.write_text(text)
+print("  已写入 /releases/ location")
+PY
+  nginx -t && systemctl reload nginx
+  echo "  nginx reloaded"
+else
+  echo "  nginx /releases/ 已存在"
+fi
+REMOTE
+    echo "✓ 官网镜像：https://iaiaiai.ai/releases/"
+  else
+    echo "⚠ 跳过官网镜像同步（无法 SSH $MIRROR_HOST）"
+  fi
 else
   echo "📋 下一步：去 https://github.com/i3xai/iaichain/releases 创建 release $TAG"
   echo "   把以下资产拖上去（或用 gh CLI）："
