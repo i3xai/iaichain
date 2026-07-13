@@ -347,6 +347,29 @@ fn apply_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.execute("INSERT INTO schema_migrations (version) VALUES (11)", [])?;
     }
 
+    // v12：入队留言/拒绝原因；任务角色招募申请；节点角色可切换。
+    if applied < 12 {
+        conn.execute_batch(
+            "ALTER TABLE join_request ADD COLUMN message TEXT NOT NULL DEFAULT '';
+             ALTER TABLE join_request ADD COLUMN reject_reason TEXT NOT NULL DEFAULT '';
+             CREATE TABLE IF NOT EXISTS recruit_application (
+                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                 task_id         TEXT NOT NULL,
+                 role_name       TEXT NOT NULL,
+                 applicant_node  TEXT NOT NULL,
+                 message         TEXT NOT NULL DEFAULT '',
+                 model           TEXT NOT NULL DEFAULT '',
+                 status          TEXT NOT NULL DEFAULT 'pending',
+                 reject_reason   TEXT NOT NULL DEFAULT '',
+                 created_at      TEXT NOT NULL DEFAULT (datetime('now','+8 hours')),
+                 decided_at      TEXT,
+                 UNIQUE(task_id, role_name, applicant_node)
+             );",
+        )
+        .context("应用迁移 v12 失败")?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (12)", [])?;
+    }
+
     Ok(())
 }
 
@@ -355,6 +378,23 @@ pub struct StoredNode {
     pub node_id: String,
     pub role: NodeRole,
     pub status: NodeStatus,
+}
+
+/// 设置本机节点角色（captain | member）。
+pub fn set_node_role(conn: &Connection, role: NodeRole) -> anyhow::Result<()> {
+    let id = ensure_node(conn)?;
+    conn.execute("UPDATE node SET role = ?1 WHERE node_id = ?2", params![role.as_str(), id])?;
+    // 刷新本机团队展示角色
+    conn.execute(
+        "UPDATE team_member SET role = ?1 WHERE node_id = ?2 AND is_self = 1",
+        params![role.display_zh(), id],
+    )?;
+    Ok(())
+}
+
+/// 本机是否为队长节点。
+pub fn is_captain_node(conn: &Connection) -> anyhow::Result<bool> {
+    Ok(get_node(conn)?.map(|n| n.role == NodeRole::Captain).unwrap_or(false))
 }
 
 /// 确保本机节点存在；首次调用生成并落库。返回 node_id。
@@ -732,16 +772,19 @@ pub struct JoinRequestRow {
     pub role: String,
     pub model: String,
     pub status: String,
+    pub message: String,
+    pub reject_reason: String,
     pub created_at: String,
 }
 
-/// 提交或刷新入队申请为 pending（幂等：已 approved 保持不动）。
+/// 提交入队申请。已 approved 保持；已 rejected 禁止再次申请；可带留言。
 pub fn upsert_join_request(
     conn: &Connection,
     captain: &str,
     applicant: &str,
     role: &str,
     model: &str,
+    message: &str,
 ) -> anyhow::Result<i64> {
     let existing: Option<(i64, String)> = conn
         .query_row(
@@ -754,25 +797,29 @@ pub fn upsert_join_request(
         if status == "approved" {
             return Ok(id);
         }
+        if status == "rejected" {
+            anyhow::bail!("申请已被拒绝，本次不可再次申请");
+        }
+        // pending：允许更新角色/模型/留言
         conn.execute(
-            "UPDATE join_request SET role = ?1, model = ?2, status = 'pending', decided_at = NULL
-             WHERE id = ?3",
-            params![role, model, id],
+            "UPDATE join_request SET role = ?1, model = ?2, message = ?3 WHERE id = ?4",
+            params![role, model, message, id],
         )?;
         return Ok(id);
     }
     conn.execute(
-        "INSERT INTO join_request (captain_node, applicant_node, role, model, status)
-         VALUES (?1, ?2, ?3, ?4, 'pending')",
-        params![captain, applicant, role, model],
+        "INSERT INTO join_request (captain_node, applicant_node, role, model, message, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+        params![captain, applicant, role, model, message],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
-/// 队长侧：列出本地 pending（及全部，供 UI）。
+/// 队长侧：列出本地入队申请。
 pub fn list_join_requests(conn: &Connection, captain: &str) -> anyhow::Result<Vec<JoinRequestRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, captain_node, applicant_node, role, model, status, created_at
+        "SELECT id, captain_node, applicant_node, role, model, status,
+                COALESCE(message,''), COALESCE(reject_reason,''), created_at
          FROM join_request WHERE captain_node = ?1
          ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, id DESC",
     )?;
@@ -785,14 +832,16 @@ pub fn list_join_requests(conn: &Connection, captain: &str) -> anyhow::Result<Ve
                 role: r.get(3)?,
                 model: r.get(4)?,
                 status: r.get(5)?,
-                created_at: r.get(6)?,
+                message: r.get(6)?,
+                reject_reason: r.get(7)?,
+                created_at: r.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
-/// 决定入队申请；approve 时同步写入 team_member。
+/// 决定入队申请；approve 时同步写入 team_member；reject 须可带原因。
 pub fn decide_join_request(
     conn: &Connection,
     captain: &str,
@@ -800,19 +849,25 @@ pub fn decide_join_request(
     approve: bool,
     role: Option<&str>,
     model: Option<&str>,
+    reject_reason: Option<&str>,
 ) -> anyhow::Result<()> {
-    let row: (i64, String, String) = conn
+    let row: (i64, String, String, String) = conn
         .query_row(
-            "SELECT id, role, model FROM join_request
+            "SELECT id, role, model, status FROM join_request
              WHERE captain_node = ?1 AND applicant_node = ?2",
             params![captain, applicant],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .context("入队申请不存在")?;
+    if row.3 != "pending" {
+        anyhow::bail!("申请已处理（当前状态 {}）", row.3);
+    }
     let status = if approve { "approved" } else { "rejected" };
+    let reason = if approve { "" } else { reject_reason.unwrap_or("").trim() };
     conn.execute(
-        "UPDATE join_request SET status = ?1, decided_at = datetime('now','+8 hours') WHERE id = ?2",
-        params![status, row.0],
+        "UPDATE join_request SET status = ?1, reject_reason = ?2,
+             decided_at = datetime('now','+8 hours') WHERE id = ?3",
+        params![status, reason, row.0],
     )?;
     if approve {
         let r = role.unwrap_or(&row.1);
@@ -882,6 +937,8 @@ pub struct TaskRow {
     pub repo: String,
     pub prompt: String,
     pub state: TaskState,
+    /// 原始状态串（含 recruiting / ready_to_run 等 V2 扩展态）。
+    pub state_key: String,
     pub result: Option<String>,
 }
 
@@ -969,12 +1026,14 @@ pub fn finish_subtask(
 }
 
 fn map_task(r: &Row) -> rusqlite::Result<TaskRow> {
+    let state_key: String = r.get(4)?;
     Ok(TaskRow {
         task_id: r.get(0)?,
         title: r.get(1)?,
         repo: r.get(2)?,
         prompt: r.get(3)?,
-        state: TaskState::from_str(&r.get::<_, String>(4)?),
+        state: TaskState::from_str(&state_key),
+        state_key,
         result: r.get(5)?,
     })
 }
@@ -1256,7 +1315,7 @@ pub fn create_task_v2(
             branch, reward_total, reward_locked, captain_node, visibility)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
-            task_id, title, repo_display, title, "created",
+            task_id, title, repo_display, title, "recruiting",
             repo.kind, repo.url, repo.host, repo.path, branch,
             reward, reward, captain_node, visibility
         ],
@@ -1605,6 +1664,202 @@ pub fn list_stale_working(
     Ok(rows)
 }
 
+/// 在线且当前无 busy 模型任务的队员（供队长邀请）。
+pub fn list_idle_members(conn: &Connection) -> anyhow::Result<Vec<TeamMember>> {
+    ensure_self_member(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT m.node_id, m.role, m.model, m.online, m.credits, m.is_self
+         FROM team_member m
+         WHERE m.is_self = 0 AND m.online = 1
+           AND NOT EXISTS (
+             SELECT 1 FROM model_instance i
+             WHERE i.node_id = m.node_id AND i.status = 'busy'
+           )
+         ORDER BY m.credits DESC, m.node_id ASC",
+    )?;
+    let rows = stmt.query_map([], map_member)?.collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 任务某角色尚有 open 槽数量。
+pub fn count_open_slots_for_role(conn: &Connection, task_id: &str, role_name: &str) -> anyhow::Result<i64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM assignment a
+         JOIN task_role tr ON a.task_role_id = tr.id
+         WHERE a.task_id = ?1 AND tr.name = ?2 AND a.status = 'open'",
+        params![task_id, role_name],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
+/// 任务全部招募槽是否已占满（无 open）。
+pub fn recruitment_complete(conn: &Connection, task_id: &str) -> anyhow::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM assignment WHERE task_id = ?1 AND status = 'open'",
+        params![task_id],
+        |r| r.get(0),
+    )?;
+    Ok(n == 0)
+}
+
+/// 若招募完成则切到 ready_to_run。
+pub fn maybe_mark_ready_to_run(conn: &Connection, task_id: &str) -> anyhow::Result<bool> {
+    if !recruitment_complete(conn, task_id)? {
+        return Ok(false);
+    }
+    set_task_state_str(conn, task_id, "ready_to_run")?;
+    Ok(true)
+}
+
+/// 取一个 open 槽 id（按 slot_index）。
+pub fn first_open_assignment(conn: &Connection, task_id: &str, role_name: &str) -> anyhow::Result<Option<i64>> {
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT a.id FROM assignment a
+             JOIN task_role tr ON a.task_role_id = tr.id
+             WHERE a.task_id = ?1 AND tr.name = ?2 AND a.status = 'open'
+             ORDER BY a.slot_index ASC LIMIT 1",
+            params![task_id, role_name],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(id)
+}
+
+#[derive(Debug, Clone)]
+pub struct RecruitApplicationRow {
+    pub id: i64,
+    pub task_id: String,
+    pub role_name: String,
+    pub applicant_node: String,
+    pub message: String,
+    pub model: String,
+    pub status: String,
+    pub reject_reason: String,
+    pub created_at: String,
+}
+
+/// 队员申请任务角色（招募未完成）。已拒绝不可再申请同一角色。
+pub fn apply_recruit(
+    conn: &Connection,
+    task_id: &str,
+    role_name: &str,
+    applicant: &str,
+    message: &str,
+    model: &str,
+) -> anyhow::Result<i64> {
+    let open = count_open_slots_for_role(conn, task_id, role_name)?;
+    if open <= 0 {
+        anyhow::bail!("该角色已无空余招募名额");
+    }
+    let existing: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, status FROM recruit_application
+             WHERE task_id = ?1 AND role_name = ?2 AND applicant_node = ?3",
+            params![task_id, role_name, applicant],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    if let Some((id, status)) = existing {
+        if status == "approved" {
+            return Ok(id);
+        }
+        if status == "rejected" {
+            anyhow::bail!("该角色申请已被拒绝，本次不可再次申请");
+        }
+        conn.execute(
+            "UPDATE recruit_application SET message = ?1, model = ?2 WHERE id = ?3",
+            params![message, model, id],
+        )?;
+        return Ok(id);
+    }
+    conn.execute(
+        "INSERT INTO recruit_application (task_id, role_name, applicant_node, message, model, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+        params![task_id, role_name, applicant, message, model],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn list_recruit_applications(
+    conn: &Connection,
+    task_id: Option<&str>,
+) -> anyhow::Result<Vec<RecruitApplicationRow>> {
+    let sql = if task_id.is_some() {
+        "SELECT id, task_id, role_name, applicant_node, message, model, status, reject_reason, created_at
+         FROM recruit_application WHERE task_id = ?1
+         ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, id DESC"
+    } else {
+        "SELECT id, task_id, role_name, applicant_node, message, model, status, reject_reason, created_at
+         FROM recruit_application
+         ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, id DESC"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let map = |r: &Row| {
+        Ok(RecruitApplicationRow {
+            id: r.get(0)?,
+            task_id: r.get(1)?,
+            role_name: r.get(2)?,
+            applicant_node: r.get(3)?,
+            message: r.get(4)?,
+            model: r.get(5)?,
+            status: r.get(6)?,
+            reject_reason: r.get(7)?,
+            created_at: r.get(8)?,
+        })
+    };
+    let rows = if let Some(tid) = task_id {
+        stmt.query_map(params![tid], map)?.collect::<Result<Vec<_>, _>>()?
+    } else {
+        stmt.query_map([], map)?.collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(rows)
+}
+
+/// 队长批准/拒绝任务角色申请；批准则占槽并加入团队。
+pub fn decide_recruit(
+    conn: &Connection,
+    task_id: &str,
+    role_name: &str,
+    applicant: &str,
+    approve: bool,
+    reject_reason: Option<&str>,
+) -> anyhow::Result<()> {
+    let row: (i64, String, String) = conn
+        .query_row(
+            "SELECT id, status, model FROM recruit_application
+             WHERE task_id = ?1 AND role_name = ?2 AND applicant_node = ?3",
+            params![task_id, role_name, applicant],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .context("招募申请不存在")?;
+    if row.1 != "pending" {
+        anyhow::bail!("申请已处理");
+    }
+    if approve {
+        let slot = first_open_assignment(conn, task_id, role_name)?
+            .context("该角色已无空余槽位")?;
+        let model = if row.2.is_empty() { "any".to_string() } else { row.2.clone() };
+        claim_assignment(conn, slot, applicant, &model)?;
+        invite_member(conn, applicant, role_name, &model, 0, true)?;
+        conn.execute(
+            "UPDATE recruit_application SET status='approved',
+                 decided_at=datetime('now','+8 hours') WHERE id=?1",
+            params![row.0],
+        )?;
+        let _ = maybe_mark_ready_to_run(conn, task_id)?;
+    } else {
+        let reason = reject_reason.unwrap_or("").trim();
+        conn.execute(
+            "UPDATE recruit_application SET status='rejected', reject_reason=?1,
+                 decided_at=datetime('now','+8 hours') WHERE id=?2",
+            params![reason, row.0],
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1618,22 +1873,27 @@ mod tests {
     #[test]
     fn join_request_approve_adds_member() {
         let conn = mem();
-        upsert_join_request(&conn, "cap.1", "node.a", "后端", "gpt").unwrap();
+        upsert_join_request(&conn, "cap.1", "node.a", "后端", "gpt", "想加入").unwrap();
         let pending = list_join_requests(&conn, "cap.1").unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].status, "pending");
-        decide_join_request(&conn, "cap.1", "node.a", true, None, None).unwrap();
+        assert_eq!(pending[0].message, "想加入");
+        decide_join_request(&conn, "cap.1", "node.a", true, None, None, None).unwrap();
         assert!(is_team_member(&conn, "node.a").unwrap());
         let after = list_join_requests(&conn, "cap.1").unwrap();
         assert_eq!(after[0].status, "approved");
     }
 
     #[test]
-    fn join_request_reject_keeps_out() {
+    fn join_request_reject_blocks_reapply() {
         let conn = mem();
-        upsert_join_request(&conn, "cap.1", "node.b", "测试", "ds").unwrap();
-        decide_join_request(&conn, "cap.1", "node.b", false, None, None).unwrap();
+        upsert_join_request(&conn, "cap.1", "node.b", "测试", "ds", "").unwrap();
+        decide_join_request(&conn, "cap.1", "node.b", false, None, None, Some("名额已满")).unwrap();
         assert!(!is_team_member(&conn, "node.b").unwrap());
+        let err = upsert_join_request(&conn, "cap.1", "node.b", "测试", "ds", "再试").unwrap_err();
+        assert!(err.to_string().contains("不可再次申请"));
+        let rows = list_join_requests(&conn, "cap.1").unwrap();
+        assert_eq!(rows[0].reject_reason, "名额已满");
     }
 
     #[test]
@@ -1645,5 +1905,71 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, "approved");
         assert_eq!(rows[0].model, "m2");
+    }
+
+    #[test]
+    fn recruit_approve_marks_ready_to_run() {
+        let conn = mem();
+        ensure_node(&conn).unwrap();
+        set_node_role(&conn, NodeRole::Captain).unwrap();
+        let repo = RepoSpec {
+            kind: "opensource".into(),
+            url: "https://github.com/acme/x".into(),
+            host: String::new(),
+            path: String::new(),
+            branch: "main".into(),
+        };
+        let tid = create_task_v2(
+            &conn,
+            "demo",
+            &repo,
+            &[TaskRoleSpec {
+                name: "后端".into(),
+                prompt: "写接口".into(),
+                recruit_count: 1,
+                model_filter: "any".into(),
+            }],
+            0,
+            "private",
+        )
+        .unwrap();
+        assert_eq!(get_task(&conn, &tid).unwrap().unwrap().state_key, "recruiting");
+        apply_recruit(&conn, &tid, "后端", "node.m1", "想干", "gpt").unwrap();
+        decide_recruit(&conn, &tid, "后端", "node.m1", true, None).unwrap();
+        assert!(recruitment_complete(&conn, &tid).unwrap());
+        assert_eq!(get_task(&conn, &tid).unwrap().unwrap().state_key, "ready_to_run");
+        let err = apply_recruit(&conn, &tid, "后端", "node.m2", "晚了", "gpt").unwrap_err();
+        assert!(err.to_string().contains("空余"));
+    }
+
+    #[test]
+    fn recruit_reject_blocks_reapply() {
+        let conn = mem();
+        ensure_node(&conn).unwrap();
+        let repo = RepoSpec {
+            kind: "opensource".into(),
+            url: "https://github.com/acme/x".into(),
+            host: String::new(),
+            path: String::new(),
+            branch: "main".into(),
+        };
+        let tid = create_task_v2(
+            &conn,
+            "demo2",
+            &repo,
+            &[TaskRoleSpec {
+                name: "测试".into(),
+                prompt: "测".into(),
+                recruit_count: 1,
+                model_filter: "any".into(),
+            }],
+            0,
+            "private",
+        )
+        .unwrap();
+        apply_recruit(&conn, &tid, "测试", "node.x", "hi", "m").unwrap();
+        decide_recruit(&conn, &tid, "测试", "node.x", false, Some("不合适")).unwrap();
+        let err = apply_recruit(&conn, &tid, "测试", "node.x", "再试", "m").unwrap_err();
+        assert!(err.to_string().contains("不可再次申请"));
     }
 }

@@ -97,7 +97,7 @@ async fn watchdog_loop() {
 pub fn router() -> Router {
     // 受保护的 API 路由子树。
     let protected = Router::new()
-        .route("/api/node", get(node))
+        .route("/api/node", get(node).put(node_set_role))
         .route("/api/node/models", get(list_models).post(add_model))
         .route("/api/wallet", get(wallet))
         .route("/api/ledger", get(ledger_list))
@@ -106,6 +106,7 @@ pub fn router() -> Router {
         .route("/api/market/buy", post(market_buy))
         .route("/api/market/sell", post(market_sell))
         .route("/api/team", get(team))
+        .route("/api/team/idle", get(team_idle))
         .route("/api/team/recruit", post(team_recruit))
         .route("/api/team/invite", post(team_invite))
         .route("/api/team/join", post(team_join))
@@ -115,6 +116,10 @@ pub fn router() -> Router {
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/:id", get(task_detail))
         .route("/api/tasks/:id/log", get(task_log))
+        .route("/api/tasks/:id/start", post(task_start))
+        .route("/api/tasks/:id/recruit/apply", post(recruit_apply))
+        .route("/api/tasks/:id/recruit/applications", get(recruit_list))
+        .route("/api/tasks/:id/recruit/decide", post(recruit_decide))
         .route("/api/tasks/compose", post(tasks_compose))
         .route("/api/roles", get(roles_list).post(roles_add))
         .route("/api/roles/:id", put(roles_update).delete(roles_delete))
@@ -217,6 +222,8 @@ async fn node() -> ApiResult {
     Ok(Json(json!({
         "id": n.node_id,
         "role": n.role.display_zh(),
+        "roleKey": n.role.as_str(),
+        "isCaptain": n.role == iai_node::NodeRole::Captain,
         "online": n.status.is_online(),
         // 负载实时监控属阶段 5（任务编排），此处为占位 0。
         "load": 0,
@@ -224,6 +231,29 @@ async fn node() -> ApiResult {
         "capabilities": caps,
         "modelConfigured": !labels.is_empty(),
     })))
+}
+
+#[derive(Deserialize)]
+struct NodeRoleReq {
+    /// captain | member
+    role: String,
+}
+
+/// PUT /api/node —— 设置本机节点角色（队长 / 队员）。
+async fn node_set_role(Json(req): Json<NodeRoleReq>) -> ApiResult {
+    let role = match req.role.trim().to_ascii_lowercase().as_str() {
+        "captain" | "队长" => iai_node::NodeRole::Captain,
+        "member" | "队员" => iai_node::NodeRole::Member,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "role 须为 captain 或 member" })),
+            ))
+        }
+    };
+    let conn = storage::open_conn().map_err(err500)?;
+    storage::set_node_role(&conn, role).map_err(err500)?;
+    Ok(Json(json!({ "ok": true, "role": role.display_zh(), "roleKey": role.as_str() })))
 }
 
 /// GET /api/node/models —— 已配置模型列表（不含 key）。
@@ -437,9 +467,12 @@ struct InviteReq {
     online: Option<bool>,
 }
 
-/// POST /api/team/invite —— 邀请 / 登记成员节点。
+/// POST /api/team/invite —— 邀请 / 登记成员节点（仅队长）。
 async fn team_invite(Json(req): Json<InviteReq>) -> ApiResult {
     let conn = storage::open_conn().map_err(err500)?;
+    if !storage::is_captain_node(&conn).map_err(err500)? {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "仅队长可邀请队员" }))));
+    }
     let captain = storage::ensure_node(&conn).map_err(err500)?;
     storage::invite_member(
         &conn,
@@ -460,10 +493,34 @@ async fn team_invite(Json(req): Json<InviteReq>) -> ApiResult {
             true,
             Some(&req.role),
             Some(&req.model),
+            None,
         )
         .await;
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+/// GET /api/team/idle —— 在线空闲队员（供队长邀请）。
+async fn team_idle() -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    if !storage::is_captain_node(&conn).map_err(err500)? {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "仅队长可查看空闲队员" }))));
+    }
+    let members = storage::list_idle_members(&conn).map_err(err500)?;
+    let rows: Vec<Value> = members
+        .iter()
+        .map(|m| {
+            json!({
+                "nodeId": m.node_id,
+                "role": m.role,
+                "model": m.model,
+                "online": m.online,
+                "credits": m.credits,
+                "idle": true,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "members": rows })))
 }
 
 #[derive(Deserialize)]
@@ -473,6 +530,8 @@ struct JoinReq {
     captain_node_id: String,
     role: Option<String>,
     model: Option<String>,
+    /// 加入词 / 留言
+    message: Option<String>,
 }
 
 /// POST /api/team/join —— 申请加入某队长团队（写入中继 + 本地镜像）。
@@ -491,61 +550,52 @@ async fn team_join(Json(req): Json<JoinReq>) -> ApiResult {
         .model
         .or_else(|| storage::self_model(&conn).ok())
         .unwrap_or_default();
-    storage::upsert_join_request(&conn, captain, &applicant, &role, &model).map_err(err500)?;
+    let message = req.message.unwrap_or_default();
+    storage::upsert_join_request(&conn, captain, &applicant, &role, &model, &message)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))))?;
     let url = relay::relay_url().ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "未配置中继 IAI_RELAY，无法跨节点申请入队" })),
         )
     })?;
-    relay::join_apply_remote(&url, captain, &applicant, &role, &model)
+    relay::join_apply_remote(&url, captain, &applicant, &role, &model, &message)
         .await
-        .map_err(err500)?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))))?;
     Ok(Json(json!({ "ok": true, "status": "pending" })))
 }
 
 /// GET /api/team/join-requests —— 队长查看申请（中继优先，并镜像本地）。
 async fn team_join_requests() -> ApiResult {
     let conn = storage::open_conn().map_err(err500)?;
+    if !storage::is_captain_node(&conn).map_err(err500)? {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "仅队长可审批入队申请" }))));
+    }
     let captain = storage::ensure_node(&conn).map_err(err500)?;
-    let mut items: Vec<Value> = Vec::new();
+    // 以本地为准（含留言/拒绝原因）；中继仅补充 pending 镜像
     if let Some(url) = relay::relay_url() {
         if let Ok(remote) = relay::fetch_joins(&url, Some(&captain)).await {
             for j in remote {
-                match j.status.as_str() {
-                    "approved" => {
-                        let _ = storage::mark_join_approved(
-                            &conn, &j.captain, &j.applicant, &j.role, &j.model,
-                        );
-                    }
-                    "pending" => {
-                        let _ = storage::upsert_join_request(
-                            &conn, &j.captain, &j.applicant, &j.role, &j.model,
-                        );
-                    }
-                    _ => {}
+                if j.status == "pending" {
+                    let _ = storage::upsert_join_request(
+                        &conn, &j.captain, &j.applicant, &j.role, &j.model, "",
+                    );
                 }
-                items.push(json!({
-                    "captainNodeId": j.captain,
-                    "applicantNodeId": j.applicant,
-                    "role": j.role,
-                    "model": j.model,
-                    "status": j.status,
-                }));
             }
         }
     }
-    if items.is_empty() {
-        for r in storage::list_join_requests(&conn, &captain).map_err(err500)? {
-            items.push(json!({
-                "captainNodeId": r.captain_node,
-                "applicantNodeId": r.applicant_node,
-                "role": r.role,
-                "model": r.model,
-                "status": r.status,
-                "createdAt": r.created_at,
-            }));
-        }
+    let mut items: Vec<Value> = Vec::new();
+    for r in storage::list_join_requests(&conn, &captain).map_err(err500)? {
+        items.push(json!({
+            "captainNodeId": r.captain_node,
+            "applicantNodeId": r.applicant_node,
+            "role": r.role,
+            "model": r.model,
+            "status": r.status,
+            "message": r.message,
+            "rejectReason": r.reject_reason,
+            "createdAt": r.created_at,
+        }));
     }
     Ok(Json(json!({ "requests": items })))
 }
@@ -557,21 +607,29 @@ struct JoinDecideBody {
     approve: bool,
     role: Option<String>,
     model: Option<String>,
+    #[serde(rename = "rejectReason")]
+    reject_reason: Option<String>,
 }
 
 /// POST /api/team/join-requests/decide —— 队长批准/拒绝。
 async fn team_join_decide(Json(req): Json<JoinDecideBody>) -> ApiResult {
     let conn = storage::open_conn().map_err(err500)?;
+    if !storage::is_captain_node(&conn).map_err(err500)? {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "仅队长可审批" }))));
+    }
     let captain = storage::ensure_node(&conn).map_err(err500)?;
     let applicant = req.applicant_node_id.trim();
     if applicant.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 applicantNodeId" }))));
     }
+    if !req.approve && req.reject_reason.as_deref().unwrap_or("").trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "拒绝时须填写原因" }))));
+    }
     // 若本地无记录，先从中继拉一条镜像
     if let Some(url) = relay::relay_url() {
         if let Ok(remote) = relay::fetch_joins(&url, Some(&captain)).await {
             if let Some(j) = remote.iter().find(|j| j.applicant == applicant) {
-                let _ = storage::upsert_join_request(&conn, &captain, applicant, &j.role, &j.model);
+                let _ = storage::upsert_join_request(&conn, &captain, applicant, &j.role, &j.model, "");
             }
         }
     }
@@ -582,6 +640,7 @@ async fn team_join_decide(Json(req): Json<JoinDecideBody>) -> ApiResult {
         req.approve,
         req.role.as_deref(),
         req.model.as_deref(),
+        req.reject_reason.as_deref(),
     )
     .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))))?;
     if let Some(url) = relay::relay_url() {
@@ -592,6 +651,7 @@ async fn team_join_decide(Json(req): Json<JoinDecideBody>) -> ApiResult {
             req.approve,
             req.role.as_deref(),
             req.model.as_deref(),
+            req.reject_reason.as_deref(),
         )
         .await
         .map_err(err500)?;
@@ -601,16 +661,42 @@ async fn team_join_decide(Json(req): Json<JoinDecideBody>) -> ApiResult {
 
 /* ---------- 阶段 5：任务编排 ---------- */
 
-/// 把任务 + 子任务组装为前端任务卡所需结构 { id, t, repo, st, pct, roles }。
+/// 把任务 + 子任务组装为前端任务卡所需结构 { id, t, repo, st, pct, roles, stateKey }。
 fn task_json(conn: &Connection, t: &storage::TaskRow) -> anyhow::Result<Value> {
+    let state_label = match t.state_key.as_str() {
+        "recruiting" => "招募中",
+        "ready_to_run" => "招募完成可运行",
+        "executing" | "working" => "执行中",
+        "reviewing" => "评审中",
+        "aggregated" => "已采纳",
+        "settled" => "已结算",
+        other if other == t.state.as_str() => t.state.display_zh(),
+        other => other,
+    };
     // V2 任务（compose 创建）：用招募槽 assignment 计算角色与进度。
     let assigns = storage::list_assignments(conn, &t.task_id)?;
     if !assigns.is_empty() {
         let total = assigns.len();
         let done = assigns.iter().filter(|a| a.status == "done").count();
         let settled = t.state.is_delivered() || (total > 0 && done == total);
-        let pct = if settled { 100 } else if total > 0 { done * 100 / total } else { 0 };
-        let st = if settled { "done" } else { "run" };
+        let pct = if settled {
+            100
+        } else if t.state_key == "ready_to_run" {
+            0
+        } else if total > 0 {
+            done * 100 / total
+        } else {
+            0
+        };
+        let st = if settled {
+            "done"
+        } else if t.state_key == "recruiting" {
+            "recruiting"
+        } else if t.state_key == "ready_to_run" {
+            "ready"
+        } else {
+            "run"
+        };
         let roles: Vec<Value> = assigns
             .iter()
             .map(|a| {
@@ -622,7 +708,10 @@ fn task_json(conn: &Connection, t: &storage::TaskRow) -> anyhow::Result<Value> {
                 json!([a.role_name, s])
             })
             .collect();
-        return Ok(json!({ "id": t.task_id, "t": t.title, "repo": t.repo, "st": st, "pct": pct, "roles": roles }));
+        return Ok(json!({
+            "id": t.task_id, "t": t.title, "repo": t.repo, "st": st, "pct": pct,
+            "roles": roles, "stateKey": t.state_key, "stateLabel": state_label
+        }));
     }
     let subs = storage::list_subtasks(conn, &t.task_id)?;
     let total = subs.len().max(1);
@@ -640,7 +729,10 @@ fn task_json(conn: &Connection, t: &storage::TaskRow) -> anyhow::Result<Value> {
             json!([s.role, status])
         })
         .collect();
-    Ok(json!({ "id": t.task_id, "t": t.title, "repo": t.repo, "st": st, "pct": pct, "roles": roles }))
+    Ok(json!({
+        "id": t.task_id, "t": t.title, "repo": t.repo, "st": st, "pct": pct,
+        "roles": roles, "stateKey": t.state_key, "stateLabel": state_label
+    }))
 }
 
 /// GET /api/tasks —— 任务列表（最新在前）。
@@ -663,6 +755,9 @@ struct CreateTaskReq {
 /// POST /api/tasks —— 发起任务：解析→分解→匹配（同步），随后异步驱动执行。
 async fn tasks_create(Json(req): Json<CreateTaskReq>) -> ApiResult {
     let conn = storage::open_conn().map_err(err500)?;
+    if !storage::is_captain_node(&conn).map_err(err500)? {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "仅队长可发起任务" }))));
+    }
     let task_id = orchestrator::create_task(&conn, &req.prompt, &req.repo)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))))?;
     let id = task_id.clone();
@@ -682,7 +777,14 @@ async fn task_detail(Path(id): Path<String>) -> ApiResult {
     };
     let mut v = task_json(&conn, &t).map_err(err500)?;
     if let Value::Object(ref mut m) = v {
-        m.insert("state".into(), json!(t.state.display_zh()));
+        m.insert("state".into(), json!(match t.state_key.as_str() {
+            "recruiting" => "招募中",
+            "ready_to_run" => "招募完成可运行",
+            "executing" => "执行中",
+            "reviewing" => "评审中",
+            _ => t.state.display_zh(),
+        }));
+        m.insert("stateKey".into(), json!(t.state_key));
         m.insert("result".into(), json!(t.result));
         let assigns = storage::list_assignments(&conn, &id).map_err(err500)?;
         m.insert(
@@ -700,6 +802,18 @@ async fn task_detail(Path(id): Path<String>) -> ApiResult {
                 .map(|(node, role, credits, basis)| json!({ "node": node, "role": role, "credits": credits, "basis": basis }))
                 .collect::<Vec<_>>()),
         );
+        // 招募申请（队长可见）
+        if storage::is_captain_node(&conn).map_err(err500)? {
+            let apps = storage::list_recruit_applications(&conn, Some(&id)).map_err(err500)?;
+            m.insert(
+                "recruitApplications".into(),
+                json!(apps.iter().map(|a| json!({
+                    "id": a.id, "role": a.role_name, "applicant": a.applicant_node,
+                    "message": a.message, "model": a.model, "status": a.status,
+                    "rejectReason": a.reject_reason, "createdAt": a.created_at
+                })).collect::<Vec<_>>()),
+            );
+        }
     }
     Ok(Json(v))
 }
@@ -881,7 +995,7 @@ struct ComposeReq {
     visibility: String,
 }
 
-/// POST /api/tasks/compose —— V2 任务创建（仓库+多角色+招募+奖金）。
+/// POST /api/tasks/compose —— V2 任务创建（仓库+多角色+招募+奖金）。仅队长。
 async fn tasks_compose(Json(req): Json<ComposeReq>) -> ApiResult {
     if req.title.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "任务标题不能为空" }))));
@@ -893,6 +1007,9 @@ async fn tasks_compose(Json(req): Json<ComposeReq>) -> ApiResult {
         return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "奖励金不能为负" }))));
     }
     let conn = storage::open_conn().map_err(err500)?;
+    if !storage::is_captain_node(&conn).map_err(err500)? {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "仅队长可发起任务" }))));
+    }
     let self_id = storage::ensure_node(&conn).map_err(err500)?;
 
     // 奖金校验：不超过本机可用余额
@@ -943,7 +1060,7 @@ async fn tasks_compose(Json(req): Json<ComposeReq>) -> ApiResult {
             .map_err(err500)?;
     }
 
-    // network + 配了中继 → 发布到公告板等领取；否则本地 Mock 执行（阶段 9 行为，兼容未联网）
+    // network + 配了中继 → 发布到公告板等招募；不自动执行，等招募满后队长 start
     let mut published = false;
     if req.visibility == "network" {
         if let Some(url) = relay::relay_url() {
@@ -972,16 +1089,237 @@ async fn tasks_compose(Json(req): Json<ComposeReq>) -> ApiResult {
                 slots,
             };
             if relay::publish_task(&url, &ad).await.is_ok() {
-                let _ = storage::set_task_state_str(&conn, &task_id, "recruiting");
-                let _ = storage::append_op_log(&conn, &task_id, &self_id, "publish", Some("已发布到网络公告板，等待领取"));
                 published = true;
             }
         }
     }
-    if !published {
-        tokio::spawn(orchestrator::drive_v2(task_id.clone()));
+    let _ = storage::set_task_state_str(&conn, &task_id, "recruiting");
+    let _ = storage::append_op_log(
+        &conn,
+        &task_id,
+        &self_id,
+        "recruiting",
+        Some(if published {
+            "已发布到网络公告板，等待队员申请角色"
+        } else {
+            "本地招募中，等待队员申请角色"
+        }),
+    );
+    Ok(Json(json!({ "ok": true, "taskId": task_id, "published": published, "state": "recruiting" })))
+}
+
+#[derive(Deserialize)]
+struct RecruitApplyBody {
+    role: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    model: Option<String>,
+    /// 网络任务发布者（跨节点申请时必填）
+    #[serde(default)]
+    publisher: Option<String>,
+}
+
+/// POST /api/tasks/:id/recruit/apply —— 队员申请任务角色（需队长审批）。
+async fn recruit_apply(Path(id): Path<String>, Json(req): Json<RecruitApplyBody>) -> ApiResult {
+    let role = req.role.trim();
+    if role.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "请选择角色" }))));
     }
-    Ok(Json(json!({ "ok": true, "taskId": task_id, "published": published })))
+    let conn = storage::open_conn().map_err(err500)?;
+    let applicant = storage::ensure_node(&conn).map_err(err500)?;
+    let model = req
+        .model
+        .clone()
+        .or_else(|| storage::self_model(&conn).ok())
+        .unwrap_or_default();
+    let message = req.message.trim();
+
+    // 本机任务：直接写入本地申请表
+    if storage::get_task(&conn, &id).map_err(err500)?.is_some() {
+        storage::apply_recruit(&conn, &id, role, &applicant, message, &model)
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))))?;
+        let _ = storage::append_op_log(
+            &conn,
+            &id,
+            &applicant,
+            "recruit_apply",
+            Some(&format!("角色={role} 留言={message}")),
+        );
+        return Ok(Json(json!({ "ok": true, "status": "pending" })));
+    }
+
+    // 跨节点：走中继
+    let url = relay::relay_url().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "未配置中继 IAI_RELAY，无法申请远程任务" })),
+        )
+    })?;
+    let publisher = if let Some(p) = req.publisher.filter(|s| !s.trim().is_empty()) {
+        p
+    } else {
+        // 从公告板推断
+        let board = relay::fetch_board(&url).await.map_err(err500)?;
+        board
+            .into_iter()
+            .find(|t| t.task_id == id)
+            .map(|t| t.publisher)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "任务不存在" })),
+                )
+            })?
+    };
+    relay::recruit_apply_remote(&url, &id, &publisher, role, &applicant, message, &model)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))))?;
+    Ok(Json(json!({ "ok": true, "status": "pending" })))
+}
+
+/// GET /api/tasks/:id/recruit/applications —— 队长查看招募申请。
+async fn recruit_list(Path(id): Path<String>) -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    if !storage::is_captain_node(&conn).map_err(err500)? {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "仅队长可查看招募申请" }))));
+    }
+    let self_id = storage::ensure_node(&conn).map_err(err500)?;
+    // 从中继镜像到本地
+    if let Some(url) = relay::relay_url() {
+        if let Ok(remote) = relay::fetch_recruits(&url, Some(&self_id), Some(&id)).await {
+            for r in remote {
+                if r.status == "pending" {
+                    let _ = storage::apply_recruit(
+                        &conn,
+                        &r.task_id,
+                        &r.role,
+                        &r.applicant,
+                        &r.message,
+                        &r.model,
+                    );
+                }
+            }
+        }
+    }
+    let apps = storage::list_recruit_applications(&conn, Some(&id)).map_err(err500)?;
+    let items: Vec<Value> = apps
+        .iter()
+        .map(|a| {
+            json!({
+                "id": a.id,
+                "taskId": a.task_id,
+                "role": a.role_name,
+                "applicant": a.applicant_node,
+                "message": a.message,
+                "model": a.model,
+                "status": a.status,
+                "rejectReason": a.reject_reason,
+                "createdAt": a.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "applications": items })))
+}
+
+#[derive(Deserialize)]
+struct RecruitDecideBody {
+    role: String,
+    #[serde(rename = "applicantNodeId")]
+    applicant_node_id: String,
+    approve: bool,
+    #[serde(rename = "rejectReason")]
+    reject_reason: Option<String>,
+}
+
+/// POST /api/tasks/:id/recruit/decide —— 队长批准/拒绝角色申请。
+async fn recruit_decide(Path(id): Path<String>, Json(req): Json<RecruitDecideBody>) -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    if !storage::is_captain_node(&conn).map_err(err500)? {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "仅队长可审批招募" }))));
+    }
+    let role = req.role.trim();
+    let applicant = req.applicant_node_id.trim();
+    if role.is_empty() || applicant.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 role 或 applicantNodeId" }))));
+    }
+    if !req.approve && req.reject_reason.as_deref().unwrap_or("").trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "拒绝时须填写原因" }))));
+    }
+    let self_id = storage::ensure_node(&conn).map_err(err500)?;
+    // 确保本地有申请记录（可能来自中继）
+    if let Some(url) = relay::relay_url() {
+        if let Ok(remote) = relay::fetch_recruits(&url, Some(&self_id), Some(&id)).await {
+            if let Some(r) = remote.iter().find(|r| r.role == role && r.applicant == applicant) {
+                let _ = storage::apply_recruit(&conn, &id, role, applicant, &r.message, &r.model);
+            }
+        }
+    }
+    storage::decide_recruit(
+        &conn,
+        &id,
+        role,
+        applicant,
+        req.approve,
+        req.reject_reason.as_deref(),
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))))?;
+    if let Some(url) = relay::relay_url() {
+        let _ = relay::recruit_decide_remote(
+            &url,
+            &id,
+            role,
+            applicant,
+            req.approve,
+            req.reject_reason.as_deref(),
+        )
+        .await;
+    }
+    let ready = storage::maybe_mark_ready_to_run(&conn, &id).map_err(err500)?;
+    let _ = storage::append_op_log(
+        &conn,
+        &id,
+        &self_id,
+        if req.approve { "recruit_approve" } else { "recruit_reject" },
+        Some(&format!(
+            "角色={role} 申请人={applicant}{}",
+            if req.approve {
+                String::new()
+            } else {
+                format!(" 原因={}", req.reject_reason.as_deref().unwrap_or(""))
+            }
+        )),
+    );
+    Ok(Json(json!({ "ok": true, "approve": req.approve, "readyToRun": ready })))
+}
+
+/// POST /api/tasks/:id/start —— 招募完成后队长启动任务执行。
+async fn task_start(Path(id): Path<String>) -> ApiResult {
+    let conn = storage::open_conn().map_err(err500)?;
+    if !storage::is_captain_node(&conn).map_err(err500)? {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "仅队长可启动任务" }))));
+    }
+    let Some(t) = storage::get_task(&conn, &id).map_err(err500)? else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "任务不存在" }))));
+    };
+    if t.state_key != "ready_to_run" {
+        // 若槽已满但状态未刷，尝试标记
+        if storage::recruitment_complete(&conn, &id).map_err(err500)? {
+            storage::set_task_state_str(&conn, &id, "ready_to_run").map_err(err500)?;
+        } else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "招募尚未完成，无法启动" })),
+            ));
+        }
+    }
+    let self_id = storage::ensure_node(&conn).map_err(err500)?;
+    storage::set_task_state_str(&conn, &id, "executing").map_err(err500)?;
+    storage::append_op_log(&conn, &id, &self_id, "start", Some("队长启动任务执行"))
+        .map_err(err500)?;
+    let tid = id.clone();
+    tokio::spawn(orchestrator::drive_v2(tid));
+    Ok(Json(json!({ "ok": true, "state": "executing" })))
 }
 
 /// GET /api/tasks/:id/log —— 任务操作日志（需求 12）。

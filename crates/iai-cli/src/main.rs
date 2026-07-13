@@ -103,6 +103,15 @@ fn run_node(action: NodeCmd) -> anyhow::Result<()> {
                 if caps.is_empty() { "—（需先配置模型）".to_string() } else { caps.join(", ") }
             );
         }
+        NodeCmd::Role { role } => {
+            let r = match role.trim().to_ascii_lowercase().as_str() {
+                "captain" | "队长" => iai_node::NodeRole::Captain,
+                "member" | "队员" => iai_node::NodeRole::Member,
+                _ => anyhow::bail!("角色须为 captain 或 member"),
+            };
+            storage::set_node_role(&conn, r)?;
+            println!("✓ 本机角色已设为 {}", r.display_zh());
+        }
     }
     Ok(())
 }

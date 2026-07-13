@@ -216,6 +216,11 @@ pub enum ModelCmd {
 pub enum NodeCmd {
     /// 显示本机节点身份与状态。
     Status,
+    /// 设置本机角色：captain（队长）或 member（队员）。
+    Role {
+        /// captain | member
+        role: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

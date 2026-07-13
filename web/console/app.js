@@ -8,6 +8,8 @@ import {
   checkRepo, composeTask, getTask, getTaskLog, getModelInstances,
   getNetworkTasks, claimSlot, autoMatch, getHosted, setHosted,
   applyJoinTeam, getJoinRequests, decideJoinRequest,
+  inviteMember, getIdleMembers, setNodeRole,
+  applyRecruit, getRecruitApplications, decideRecruit, startTask,
 } from "/shared/api.js";
 
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -20,6 +22,8 @@ var ledger = [];
 var currentFilter = "all";
 var pollTimer = null;
 var inited = false;
+var isCaptain = true;
+var nodeInfo = null;
 
 export async function init() {
   if (inited) return;
@@ -66,10 +70,39 @@ function bindTaskDetail() {
   var list = document.getElementById("taskList");
   if (list) list.addEventListener("click", function (e) {
     var card = e.target.closest(".task"); if (!card) return;
+    if (e.target.closest("button")) return;
     var id = card.getAttribute("data-tid"); if (id) openTaskDetail(id);
   });
   document.getElementById("dmClose").addEventListener("click", function () { modal.hidden = true; });
-  modal.addEventListener("click", function (e) { if (e.target === modal) modal.hidden = true; });
+  modal.addEventListener("click", function (e) {
+    if (e.target === modal) modal.hidden = true;
+  });
+  modal.addEventListener("click", async function (e) {
+    var ap = e.target.closest(".recruit-approve");
+    var rj = e.target.closest(".recruit-reject");
+    var btn = ap || rj;
+    if (!btn) return;
+    var tid = btn.getAttribute("data-tid");
+    var role = btn.getAttribute("data-role");
+    var node = btn.getAttribute("data-node");
+    var reason = "";
+    if (rj) {
+      reason = prompt("请填写拒绝原因（拒绝后本次不可再申请）") || "";
+      if (!reason.trim()) return;
+    }
+    try {
+      await decideRecruit(tid, {
+        role: role,
+        applicantNodeId: node,
+        approve: !!ap,
+        rejectReason: reason || undefined,
+      });
+      await openTaskDetail(tid);
+      await refreshTasks();
+    } catch (err) {
+      alert(err.message || String(err));
+    }
+  });
 }
 
 async function openTaskDetail(id) {
@@ -79,14 +112,38 @@ async function openTaskDetail(id) {
     var d = await getTask(id);
     var log = await getTaskLog(id);
     $("dmTitle").textContent = d.t || "任务详情";
+    var actions = "";
+    if (isCaptain && (d.stateKey === "ready_to_run" || d.st === "ready")) {
+      actions = '<div style="margin-top:10px"><button class="btn btn-pri" id="dmStartBtn" type="button">开始下发任务</button></div>';
+    }
     $("dmMeta").innerHTML =
-      '<div class="dm-row"><span class="dm-k">状态</span><span class="dm-v">' + esc(d.state || d.st) + " · " + d.pct + '%</span></div>' +
-      '<div class="dm-row"><span class="dm-k">仓库</span><span class="dm-v">' + esc(d.repo) + "</span></div>";
+      '<div class="dm-row"><span class="dm-k">状态</span><span class="dm-v">' + esc(d.state || d.stateLabel || d.st) + " · " + d.pct + '%</span></div>' +
+      '<div class="dm-row"><span class="dm-k">仓库</span><span class="dm-v">' + esc(d.repo) + "</span></div>" + actions;
     var assigns = d.assignments || [];
     $("dmAssigns").innerHTML = assigns.length ? assigns.map(function (a) {
       var st = a.status === "done" ? '<span class="tag done">完成</span>' : a.status === "working" ? '<span class="spin"></span>' : '<span class="qty" style="font-size:11px">' + esc(a.status) + "</span>";
       return '<div class="aslot"><span class="tag role">' + esc(a.role) + '</span><span class="a-node">' + esc(a.node || "未领取") + '</span><span class="a-model">' + esc(a.model || "") + "</span>" + st + '<span class="a-tok">' + (a.tokens || 0) + " tok</span></div>";
     }).join("") : '<div class="empty" style="padding:8px 0">暂无</div>';
+
+    var pendingApps = (d.recruitApplications || []).filter(function (a) { return a.status === "pending"; });
+    if (isCaptain && !pendingApps.length && d.stateKey === "recruiting") {
+      try {
+        var ra = await getRecruitApplications(id);
+        pendingApps = ((ra && ra.applications) || []).filter(function (a) { return a.status === "pending"; });
+      } catch (_) {}
+    }
+    if (isCaptain && pendingApps.length) {
+      $("dmAssigns").innerHTML += '<div style="margin-top:12px;font-family:var(--font-mono);font-size:11px;color:var(--faint)">待审招募申请</div>' +
+        pendingApps.map(function (a) {
+          return '<div class="aslot">' +
+            '<span class="mono">' + esc(a.applicant) + '</span>' +
+            '<span class="tag role">' + esc(a.role) + '</span>' +
+            '<span class="a-model">' + esc(a.message || "") + '</span>' +
+            '<button class="btn btn-ghost recruit-approve" data-tid="' + esc(id) + '" data-role="' + esc(a.role) + '" data-node="' + esc(a.applicant) + '" style="margin-left:auto;padding:4px 10px;font-size:11px">批准</button>' +
+            '<button class="btn btn-ghost recruit-reject" data-tid="' + esc(id) + '" data-role="' + esc(a.role) + '" data-node="' + esc(a.applicant) + '" style="padding:4px 10px;font-size:11px">拒绝</button></div>';
+        }).join("");
+    }
+
     var rewards = d.rewards || [];
     $("dmRewards").innerHTML = rewards.length ? rewards.map(function (r) {
       return '<div class="dm-row"><span class="dm-k">' + esc(r.role) + " · " + esc(r.node) + '</span><span class="dm-v" style="color:var(--gold)">+' + r.credits + " 币 (" + esc(r.basis) + ")</span></div>";
@@ -95,6 +152,20 @@ async function openTaskDetail(id) {
       return '<div class="tl-item"><span class="tl-act">' + esc(l.action) + '</span><span class="tl-detail">' + esc(l.detail || "") + "</span></div>";
     }).join("") : '<div class="empty" style="padding:8px 0">无日志</div>';
     document.getElementById("detailModal").hidden = false;
+    var startBtn = $("dmStartBtn");
+    if (startBtn) {
+      startBtn.onclick = async function () {
+        startBtn.disabled = true;
+        try {
+          await startTask(id);
+          await refreshTasks();
+          openTaskDetail(id);
+        } catch (err) {
+          startBtn.disabled = false;
+          alert(err.message || String(err));
+        }
+      };
+    }
   } catch (e) { /* 静默 */ }
 }
 
@@ -241,10 +312,11 @@ async function renderNetworkTasks() {
   if (!box) return;
   var r = await getNetworkTasks();
   if (!r.relay) { box.innerHTML = '<div class="empty" style="padding:14px 0">未配置中继（IAI_RELAY）· 单机模式</div>'; return; }
-  if (!r.tasks.length) { box.innerHTML = '<div class="empty" style="padding:14px 0">网络上暂无可领取任务</div>'; return; }
+  if (!r.tasks.length) { box.innerHTML = '<div class="empty" style="padding:14px 0">暂无招募中的网络任务</div>'; return; }
   box.innerHTML = r.tasks.map(function (t) {
     var slots = t.openSlots.map(function (s) {
-      return '<div class="aslot"><span class="tag role">' + s.role + '</span><span class="a-model">' + s.modelFilter + '</span><button class="btn btn-ghost claim-btn" data-slot="' + s.slotId + '" style="margin-left:auto;padding:4px 10px;font-size:11px">领取</button></div>';
+      return '<div class="aslot"><span class="tag role">' + s.role + '</span><span class="a-model">' + s.modelFilter + '</span>' +
+        '<button class="btn btn-ghost apply-role-btn" data-tid="' + t.taskId + '" data-role="' + s.role + '" data-publisher="' + t.publisher + '" style="margin-left:auto;padding:4px 10px;font-size:11px">申请加入</button></div>';
     }).join("");
     return '<div class="task" style="margin-bottom:10px"><div class="top"><span class="ttl">' + t.title + '</span><span class="tag" style="color:var(--gold);border-color:transparent;background:oklch(83% 0.13 80 / .12)">奖金 ' + t.reward + '</span><span class="repo">' + t.repo + ' · ' + t.publisher + '</span></div>' + slots + '</div>';
   }).join("");
@@ -269,11 +341,22 @@ function bindNetwork() {
   }
   var box = document.getElementById("netTasks");
   if (box) box.addEventListener("click", async function (e) {
-    var b = e.target.closest(".claim-btn"); if (!b) return;
-    b.disabled = true; b.textContent = "领取中…";
-    try { await claimSlot(b.getAttribute("data-slot")); b.textContent = "已领取"; }
-    catch (e2) { b.textContent = "已被领取"; }
-    setTimeout(renderNetworkTasks, 800);
+    var b = e.target.closest(".apply-role-btn"); if (!b) return;
+    var msg = prompt("填写加入词（可选）") || "";
+    b.disabled = true; b.textContent = "申请中…";
+    try {
+      await applyRecruit(b.getAttribute("data-tid"), {
+        role: b.getAttribute("data-role"),
+        publisher: b.getAttribute("data-publisher"),
+        message: msg,
+      });
+      b.textContent = "已申请";
+    } catch (e2) {
+      b.textContent = "失败";
+      alert(e2.message || String(e2));
+      b.disabled = false;
+    }
+    setTimeout(renderNetworkTasks, 1200);
   });
 }
 
@@ -381,14 +464,24 @@ function roleChip(r) {
   var st = r[1] === "done" ? '<span class="tag done">已采纳</span>' : r[1] === "run" ? '<span class="spin"></span>' : '<span class="qty" style="font-size:11px">排队</span>';
   return '<div class="role-chip"><span class="tag role">' + r[0] + '</span><span class="st">' + st + "</span></div>";
 }
+function taskBadge(t) {
+  if (t.st === "done") return '<span class="tag done">已采纳 · 发起方获得功能</span>';
+  if (t.st === "recruiting" || t.stateKey === "recruiting") return '<span class="tag run">招募中</span>';
+  if (t.st === "ready" || t.stateKey === "ready_to_run") return '<span class="tag run">招募完成可运行</span>';
+  return '<span class="tag run">运行中 ' + t.pct + "%</span>";
+}
 function renderTasks(f) {
   var box = document.getElementById("taskList"); box.innerHTML = "";
-  var list = tasks.filter(function (t) { return f === "all" || t.st === f; });
+  var list = tasks.filter(function (t) {
+    if (f === "all") return true;
+    if (f === "done") return t.st === "done";
+    if (f === "run") return t.st !== "done";
+    return t.st === f;
+  });
   if (list.length === 0) { box.innerHTML = '<div class="empty"><span class="ic">▤</span>该筛选下暂无任务</div>'; return; }
   list.forEach(function (t) {
     var roles = t.roles.map(roleChip).join("");
-    var badge = t.st === "done" ? '<span class="tag done">已采纳 · 发起方获得功能</span>' : '<span class="tag run">运行中 ' + t.pct + "%</span>";
-    box.innerHTML += '<div class="task" data-tid="' + (t.id || "") + '" style="cursor:pointer"><div class="top"><span class="ttl">' + t.t + "</span>" + badge + '<span class="repo">' + t.repo + ' (public)</span></div><div class="roles">' + roles + "</div></div>";
+    box.innerHTML += '<div class="task" data-tid="' + (t.id || "") + '" style="cursor:pointer"><div class="top"><span class="ttl">' + t.t + "</span>" + taskBadge(t) + '<span class="repo">' + t.repo + '</span></div><div class="roles">' + roles + "</div></div>";
   });
 }
 function renderOverviewTasks() {
@@ -396,7 +489,10 @@ function renderOverviewTasks() {
   var top = tasks.slice(0, 3);
   if (top.length === 0) { box.innerHTML = '<div class="empty" style="padding:14px 0">暂无任务 · 去任务页发起</div>'; return; }
   box.innerHTML = top.map(function (t) {
-    var badge = t.st === "done" ? '<span class="tag done">已采纳</span>' : '<span class="tag run">运行中 ' + t.pct + '%</span>';
+    var badge = t.st === "done" ? '<span class="tag done">已采纳</span>'
+      : (t.st === "recruiting" || t.stateKey === "recruiting") ? '<span class="tag run">招募中</span>'
+      : (t.st === "ready" || t.stateKey === "ready_to_run") ? '<span class="tag run">可运行</span>'
+      : '<span class="tag run">运行中 ' + t.pct + '%</span>';
     return '<div class="kv"><span class="k">' + t.t + '</span><span class="v">' + badge + '</span></div>';
   }).join("");
 }
@@ -438,11 +534,37 @@ async function refreshJoinRequests() {
     }
     box.className = "";
     box.innerHTML = pending.map(function (r) {
-      return '<div class="aslot" style="margin:6px 0">' +
+      return '<div class="aslot" style="margin:6px 0;flex-wrap:wrap">' +
         '<span class="mono">' + r.applicantNodeId + '</span>' +
         '<span class="tag role">' + (r.role || "开发") + '</span>' +
+        '<span class="a-model">' + (r.message || "") + '</span>' +
         '<button class="btn btn-ghost join-approve" data-node="' + r.applicantNodeId + '" style="margin-left:auto;padding:4px 10px;font-size:11px">批准</button>' +
         '<button class="btn btn-ghost join-reject" data-node="' + r.applicantNodeId + '" style="padding:4px 10px;font-size:11px">拒绝</button></div>';
+    }).join("");
+  } catch (e) {
+    box.textContent = "加载失败：" + (e.message || e);
+  }
+}
+
+async function refreshIdleMembers() {
+  var box = document.getElementById("idleMemberList");
+  if (!box) return;
+  try {
+    var data = await getIdleMembers();
+    var members = (data && data.members) || [];
+    if (!members.length) {
+      box.className = "empty";
+      box.style.padding = "4px 0";
+      box.textContent = "暂无在线空闲队员（可先登记/邀请）";
+      return;
+    }
+    box.className = "";
+    box.innerHTML = members.map(function (m) {
+      return '<div class="aslot" style="margin:6px 0">' +
+        '<span class="mono">' + m.nodeId + '</span>' +
+        '<span class="tag role">' + (m.role || "队员") + '</span>' +
+        '<span class="a-model">' + (m.model || "") + '</span>' +
+        '<button class="btn btn-ghost invite-idle" data-node="' + m.nodeId + '" data-role="' + (m.role || "开发") + '" data-model="' + (m.model || "any") + '" style="margin-left:auto;padding:4px 10px;font-size:11px">邀请</button></div>';
     }).join("");
   } catch (e) {
     box.textContent = "加载失败：" + (e.message || e);
@@ -456,20 +578,27 @@ function wireTeamJoin() {
     btn.addEventListener("click", function () {
       var on = panel.style.display !== "none";
       panel.style.display = on ? "none" : "block";
-      if (!on) refreshJoinRequests();
+      if (!on) {
+        var cap = document.getElementById("captainApproveBox");
+        var mem = document.getElementById("memberApplyBox");
+        if (cap) cap.style.display = isCaptain ? "block" : "none";
+        if (mem) mem.style.display = isCaptain ? "none" : "block";
+        if (isCaptain) { refreshJoinRequests(); refreshIdleMembers(); }
+      }
     });
   }
   var applyBtn = document.getElementById("btnApplyJoin");
   if (applyBtn) {
     applyBtn.addEventListener("click", async function () {
-      var msg = document.getElementById("joinApplyMsg");
+      var msgEl = document.getElementById("joinApplyMsg");
       var captain = (document.getElementById("joinCaptainId") || {}).value || "";
       var role = (document.getElementById("joinRole") || {}).value || "开发";
+      var message = (document.getElementById("joinMessage") || {}).value || "";
       try {
-        await applyJoinTeam({ captainNodeId: captain.trim(), role: role.trim() });
-        if (msg) msg.textContent = "已提交申请，等待队长批准";
+        await applyJoinTeam({ captainNodeId: captain.trim(), role: role.trim(), message: message.trim() });
+        if (msgEl) msgEl.textContent = "已提交申请，等待队长批准";
       } catch (e) {
-        if (msg) msg.textContent = e.message || String(e);
+        if (msgEl) msgEl.textContent = e.message || String(e);
       }
     });
   }
@@ -480,10 +609,50 @@ function wireTeamJoin() {
       var r = e.target.closest(".join-reject");
       var node = (a || r) && (a || r).getAttribute("data-node");
       if (!node) return;
+      var reason = "";
+      if (r) {
+        reason = prompt("请填写拒绝原因（拒绝后本次不可再申请）") || "";
+        if (!reason.trim()) return;
+      }
       try {
-        await decideJoinRequest({ applicantNodeId: node, approve: !!a });
+        await decideJoinRequest({ applicantNodeId: node, approve: !!a, rejectReason: reason || undefined });
         await refreshJoinRequests();
         try { team = await getTeam(); renderTeam(); } catch (_) {}
+      } catch (err) {
+        alert(err.message || String(err));
+      }
+    });
+  }
+  var idle = document.getElementById("idleMemberList");
+  if (idle) {
+    idle.addEventListener("click", async function (e) {
+      var b = e.target.closest(".invite-idle"); if (!b) return;
+      b.disabled = true;
+      try {
+        await inviteMember({
+          node: b.getAttribute("data-node"),
+          role: b.getAttribute("data-role") || "开发",
+          model: b.getAttribute("data-model") || "any",
+          online: true,
+        });
+        b.textContent = "已邀请";
+        try { team = await getTeam(); renderTeam(); } catch (_) {}
+      } catch (err) {
+        b.disabled = false;
+        alert(err.message || String(err));
+      }
+    });
+  }
+  var sw = document.getElementById("btnSwitchRole");
+  if (sw) {
+    sw.style.display = "";
+    sw.addEventListener("click", async function () {
+      var next = isCaptain ? "member" : "captain";
+      try {
+        var r = await setNodeRole(next);
+        var n = await getNode();
+        renderNode(n);
+        alert("已切换为 " + (r.role || next));
       } catch (err) {
         alert(err.message || String(err));
       }
@@ -534,8 +703,10 @@ function setPill(id, online, text) {
   el.innerHTML = '<span class="dot"></span>' + text;
 }
 function renderNode(n) {
-  var role = n.role || "队长";
-  var models = n.models || [];
+  nodeInfo = n || nodeInfo;
+  var role = (n && n.role) || "队长";
+  isCaptain = !!(n && (n.isCaptain || n.roleKey === "captain" || role === "队长"));
+  var models = (n && n.models) || [];
   var setTxt = function (id, t) { var el = document.getElementById(id); if (el) el.textContent = t; };
   setTxt("barRole", role);
   setTxt("barNodeId", n.id);
@@ -545,6 +716,14 @@ function renderNode(n) {
   setTxt("nodeModels", (models.length ? "模型 " + models.join(" · ") : "未配置模型（iai model add …）") + "｜角色：" + role);
   setPill("barPill", n.online, n.online ? (n.modelConfigured ? "在线 · 模型已配置" : "在线 · 未配置模型") : "离线");
   setPill("nodePill", n.online, n.online ? "在线" : "离线");
+  var nt = document.getElementById("newTask"); if (nt) nt.style.display = isCaptain ? "" : "none";
+  var tc = document.getElementById("taskCreateCard"); if (tc) tc.style.display = isCaptain ? "" : "none";
+  var sw = document.getElementById("btnSwitchRole");
+  if (sw) { sw.style.display = ""; sw.textContent = isCaptain ? "切为队员" : "切为队长"; }
+  var ov = document.querySelector('[data-view="overview"] .view-head p');
+  if (ov) ov.textContent = isCaptain
+    ? "本机作为队长节点，可发起任务、邀请队员并审批招募。"
+    : "本机作为队员节点，可申请加入团队与未招满任务角色。";
 }
 async function renderWallet(w) {
   if (!w) { try { w = await getWallet(); } catch (_) { return; } }

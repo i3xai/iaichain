@@ -53,16 +53,38 @@ pub struct JoinAd {
     pub model: String,
     /// pending | approved | rejected
     pub status: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub reject_reason: String,
 }
 
 fn default_role() -> String {
     "开发".to_string()
 }
 
+/// 任务角色招募申请（跨节点）。
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RecruitAd {
+    pub task_id: String,
+    pub publisher: String,
+    pub role: String,
+    pub applicant: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub model: String,
+    /// pending | approved | rejected
+    pub status: String,
+    #[serde(default)]
+    pub reject_reason: String,
+}
+
 #[derive(Default)]
 struct Board {
     tasks: Vec<TaskAd>,
     joins: Vec<JoinAd>,
+    recruits: Vec<RecruitAd>,
 }
 
 type Shared = Arc<Mutex<Board>>;
@@ -79,6 +101,9 @@ pub async fn serve_relay(port: u16) -> anyhow::Result<()> {
         .route("/relay/join", post(join_apply))
         .route("/relay/joins", get(joins_list))
         .route("/relay/join/decide", post(join_decide))
+        .route("/relay/recruit", post(recruit_apply))
+        .route("/relay/recruits", get(recruits_list))
+        .route("/relay/recruit/decide", post(recruit_decide))
         .with_state(state);
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -134,20 +159,30 @@ struct JoinApplyReq {
     role: String,
     #[serde(default)]
     model: String,
+    #[serde(default)]
+    message: String,
 }
 
-async fn join_apply(State(s): State<Shared>, Json(req): Json<JoinApplyReq>) -> Json<Value> {
+async fn join_apply(State(s): State<Shared>, Json(req): Json<JoinApplyReq>) -> (StatusCode, Json<Value>) {
     let mut b = s.lock().unwrap();
     if let Some(j) = b
         .joins
         .iter_mut()
         .find(|j| j.captain == req.captain && j.applicant == req.applicant)
     {
-        if j.status != "approved" {
-            j.role = req.role;
-            j.model = req.model;
-            j.status = "pending".into();
+        if j.status == "approved" {
+            return (StatusCode::OK, Json(json!({ "ok": true, "status": "approved" })));
         }
+        if j.status == "rejected" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "申请已被拒绝，本次不可再次申请" })),
+            );
+        }
+        j.role = req.role;
+        j.model = req.model;
+        j.message = req.message;
+        j.status = "pending".into();
     } else {
         b.joins.push(JoinAd {
             captain: req.captain,
@@ -155,9 +190,11 @@ async fn join_apply(State(s): State<Shared>, Json(req): Json<JoinApplyReq>) -> J
             role: req.role,
             model: req.model,
             status: "pending".into(),
+            message: req.message,
+            reject_reason: String::new(),
         });
     }
-    Json(json!({ "ok": true }))
+    (StatusCode::OK, Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]
@@ -183,6 +220,8 @@ struct JoinDecideReq {
     role: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    reject_reason: Option<String>,
 }
 
 async fn join_decide(State(s): State<Shared>, Json(req): Json<JoinDecideReq>) -> (StatusCode, Json<Value>) {
@@ -200,6 +239,8 @@ async fn join_decide(State(s): State<Shared>, Json(req): Json<JoinDecideReq>) ->
                 role: req.role.unwrap_or_else(default_role),
                 model: req.model.unwrap_or_default(),
                 status: "approved".into(),
+                message: String::new(),
+                reject_reason: String::new(),
             });
             return (StatusCode::OK, Json(json!({ "ok": true })));
         }
@@ -211,6 +252,164 @@ async fn join_decide(State(s): State<Shared>, Json(req): Json<JoinDecideReq>) ->
     }
     if let Some(m) = req.model {
         j.model = m;
+    }
+    if !req.approve {
+        j.reject_reason = req.reject_reason.unwrap_or_default();
+    }
+    (StatusCode::OK, Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct RecruitApplyReq {
+    task_id: String,
+    publisher: String,
+    role: String,
+    applicant: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    model: String,
+}
+
+async fn recruit_apply(State(s): State<Shared>, Json(req): Json<RecruitApplyReq>) -> (StatusCode, Json<Value>) {
+    let mut b = s.lock().unwrap();
+    // 校验任务仍有未领槽
+    let open = b
+        .tasks
+        .iter()
+        .find(|t| t.task_id == req.task_id)
+        .map(|t| {
+            t.slots
+                .iter()
+                .any(|s| s.role == req.role && s.claimed_by.is_none())
+        })
+        .unwrap_or(false);
+    if !open {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "该角色已无空余招募名额或任务不存在" })),
+        );
+    }
+    if let Some(r) = b.recruits.iter_mut().find(|r| {
+        r.task_id == req.task_id && r.role == req.role && r.applicant == req.applicant
+    }) {
+        if r.status == "approved" {
+            return (StatusCode::OK, Json(json!({ "ok": true, "status": "approved" })));
+        }
+        if r.status == "rejected" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "该角色申请已被拒绝，本次不可再次申请" })),
+            );
+        }
+        r.message = req.message;
+        r.model = req.model;
+        r.status = "pending".into();
+    } else {
+        b.recruits.push(RecruitAd {
+            task_id: req.task_id,
+            publisher: req.publisher,
+            role: req.role,
+            applicant: req.applicant,
+            message: req.message,
+            model: req.model,
+            status: "pending".into(),
+            reject_reason: String::new(),
+        });
+    }
+    (StatusCode::OK, Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct RecruitsQuery {
+    publisher: Option<String>,
+    task_id: Option<String>,
+}
+
+async fn recruits_list(State(s): State<Shared>, Query(q): Query<RecruitsQuery>) -> Json<Value> {
+    let b = s.lock().unwrap();
+    let list: Vec<&RecruitAd> = b
+        .recruits
+        .iter()
+        .filter(|r| {
+            if let Some(p) = q.publisher.as_deref() {
+                if !p.is_empty() && r.publisher != p {
+                    return false;
+                }
+            }
+            if let Some(t) = q.task_id.as_deref() {
+                if !t.is_empty() && r.task_id != t {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+    Json(serde_json::to_value(list).unwrap_or(Value::Array(vec![])))
+}
+
+#[derive(Deserialize)]
+struct RecruitDecideReq {
+    task_id: String,
+    role: String,
+    applicant: String,
+    approve: bool,
+    #[serde(default)]
+    reject_reason: Option<String>,
+}
+
+async fn recruit_decide(State(s): State<Shared>, Json(req): Json<RecruitDecideReq>) -> (StatusCode, Json<Value>) {
+    let mut b = s.lock().unwrap();
+    let exists_pending = b.recruits.iter().any(|r| {
+        r.task_id == req.task_id
+            && r.role == req.role
+            && r.applicant == req.applicant
+            && r.status == "pending"
+    });
+    if !exists_pending {
+        let any = b.recruits.iter().any(|r| {
+            r.task_id == req.task_id && r.role == req.role && r.applicant == req.applicant
+        });
+        if !any {
+            return (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "招募申请不存在" })));
+        }
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "申请已处理" })),
+        );
+    }
+    if req.approve {
+        let mut claimed = false;
+        for t in b.tasks.iter_mut() {
+            if t.task_id != req.task_id {
+                continue;
+            }
+            if let Some(slot) = t
+                .slots
+                .iter_mut()
+                .find(|s| s.role == req.role && s.claimed_by.is_none())
+            {
+                slot.claimed_by = Some(req.applicant.clone());
+                claimed = true;
+                break;
+            }
+        }
+        if !claimed {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "ok": false, "error": "该角色已无空余槽位" })),
+            );
+        }
+    }
+    if let Some(r) = b.recruits.iter_mut().find(|r| {
+        r.task_id == req.task_id && r.role == req.role && r.applicant == req.applicant
+    }) {
+        if req.approve {
+            r.status = "approved".into();
+        } else {
+            r.status = "rejected".into();
+            r.reject_reason = req.reject_reason.unwrap_or_default();
+        }
     }
     (StatusCode::OK, Json(json!({ "ok": true })))
 }
@@ -258,18 +457,23 @@ pub async fn join_apply_remote(
     applicant: &str,
     role: &str,
     model: &str,
+    message: &str,
 ) -> anyhow::Result<()> {
-    reqwest::Client::new()
+    let res = reqwest::Client::new()
         .post(format!("{url}/relay/join"))
         .json(&json!({
             "captain": captain,
             "applicant": applicant,
             "role": role,
             "model": model,
+            "message": message,
         }))
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    if !res.status().is_success() {
+        let v: Value = res.json().await.unwrap_or(json!({}));
+        anyhow::bail!(v["error"].as_str().unwrap_or("入队申请失败").to_string());
+    }
     Ok(())
 }
 
@@ -289,6 +493,7 @@ pub async fn join_decide_remote(
     approve: bool,
     role: Option<&str>,
     model: Option<&str>,
+    reject_reason: Option<&str>,
 ) -> anyhow::Result<()> {
     reqwest::Client::new()
         .post(format!("{url}/relay/join/decide"))
@@ -298,10 +503,84 @@ pub async fn join_decide_remote(
             "approve": approve,
             "role": role,
             "model": model,
+            "reject_reason": reject_reason,
         }))
         .send()
         .await?
         .error_for_status()?;
+    Ok(())
+}
+
+pub async fn recruit_apply_remote(
+    url: &str,
+    task_id: &str,
+    publisher: &str,
+    role: &str,
+    applicant: &str,
+    message: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    let res = reqwest::Client::new()
+        .post(format!("{url}/relay/recruit"))
+        .json(&json!({
+            "task_id": task_id,
+            "publisher": publisher,
+            "role": role,
+            "applicant": applicant,
+            "message": message,
+            "model": model,
+        }))
+        .send()
+        .await?;
+    if !res.status().is_success() {
+        let v: Value = res.json().await.unwrap_or(json!({}));
+        anyhow::bail!(v["error"].as_str().unwrap_or("招募申请失败").to_string());
+    }
+    Ok(())
+}
+
+pub async fn fetch_recruits(
+    url: &str,
+    publisher: Option<&str>,
+    task_id: Option<&str>,
+) -> anyhow::Result<Vec<RecruitAd>> {
+    let mut req = reqwest::Client::new().get(format!("{url}/relay/recruits"));
+    let mut q: Vec<(&str, &str)> = Vec::new();
+    if let Some(p) = publisher {
+        q.push(("publisher", p));
+    }
+    if let Some(t) = task_id {
+        q.push(("task_id", t));
+    }
+    if !q.is_empty() {
+        req = req.query(&q);
+    }
+    Ok(req.send().await?.json::<Vec<RecruitAd>>().await?)
+}
+
+pub async fn recruit_decide_remote(
+    url: &str,
+    task_id: &str,
+    role: &str,
+    applicant: &str,
+    approve: bool,
+    reject_reason: Option<&str>,
+) -> anyhow::Result<()> {
+    let res = reqwest::Client::new()
+        .post(format!("{url}/relay/recruit/decide"))
+        .json(&json!({
+            "task_id": task_id,
+            "role": role,
+            "applicant": applicant,
+            "approve": approve,
+            "reject_reason": reject_reason,
+        }))
+        .send()
+        .await?;
+    if !res.status().is_success() {
+        let v: Value = res.json().await.unwrap_or(json!({}));
+        anyhow::bail!(v["error"].as_str().unwrap_or("审批失败").to_string());
+    }
     Ok(())
 }
 

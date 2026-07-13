@@ -205,7 +205,21 @@ export async function inviteMember(body) {
   return postJSON("/api/team/invite", body);
 }
 
-/** 申请加入队长团队：POST /api/team/join { captainNodeId, role?, model? }。 */
+/** 在线空闲队员：GET /api/team/idle → { members: [...] }。 */
+export async function getIdleMembers() {
+  try {
+    return await getJSON("/api/team/idle");
+  } catch {
+    return { members: [] };
+  }
+}
+
+/** 设置本机角色：PUT /api/node { role: 'captain'|'member' }。 */
+export async function setNodeRole(role) {
+  return reqJSON("PUT", "/api/node", { role });
+}
+
+/** 申请加入队长团队：POST /api/team/join { captainNodeId, role?, model?, message? }。 */
 export async function applyJoinTeam(body) {
   return postJSON("/api/team/join", body);
 }
@@ -222,6 +236,30 @@ export async function getJoinRequests() {
 /** 批准/拒绝入队：POST /api/team/join-requests/decide。 */
 export async function decideJoinRequest(body) {
   return postJSON("/api/team/join-requests/decide", body);
+}
+
+/** 申请任务角色：POST /api/tasks/:id/recruit/apply。 */
+export async function applyRecruit(taskId, body) {
+  return postJSON(`/api/tasks/${encodeURIComponent(taskId)}/recruit/apply`, body);
+}
+
+/** 队长查看招募申请。 */
+export async function getRecruitApplications(taskId) {
+  try {
+    return await getJSON(`/api/tasks/${encodeURIComponent(taskId)}/recruit/applications`);
+  } catch {
+    return { applications: [] };
+  }
+}
+
+/** 队长审批招募申请。 */
+export async function decideRecruit(taskId, body) {
+  return postJSON(`/api/tasks/${encodeURIComponent(taskId)}/recruit/decide`, body);
+}
+
+/** 队长启动任务（招募完成后）。 */
+export async function startTask(taskId) {
+  return postJSON(`/api/tasks/${encodeURIComponent(taskId)}/start`, {});
 }
 
 /* ───────────── 阶段 2：已对接真实后端（钱包 / 账本） ───────────── */

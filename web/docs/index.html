@@ -93,7 +93,7 @@ footer a{color:var(--muted)}
 <main class="wrap">
   <div class="hero">
     <h1>IAI Chain 使用手册</h1>
-    <p>从安装到「中继 + 队长 + 队员」跑通：创建网络任务、申请入队、领取槽位。对应产品 Phase 1 闭环。</p>
+    <p>从安装到「中继 + 队长 + 队员」跑通：创建任务、申请入队、申请角色、招满后启动。对应产品 Phase 1 闭环。</p>
     <div class="toc">
       <a href="#install">1. 安装</a>
       <a href="#start">2. 三进程启动</a>
@@ -135,7 +135,7 @@ footer a{color:var(--muted)}
       <tbody>
         <tr><td>中继</td><td><code class="inline">iai relay --port 8790</code></td><td>任务公告板、原子领取、入队状态（不记账）</td></tr>
         <tr><td>队长</td><td><code class="inline">IAI_HOME=~/.iai-cap IAI_RELAY=… iai serve --port 8787</code></td><td>发任务、审批入队；控制台 :8787</td></tr>
-        <tr><td>队员</td><td><code class="inline">IAI_HOME=~/.iai-mem IAI_RELAY=… iai serve --port 8788</code></td><td>申请入队、领槽；控制台 :8788</td></tr>
+        <tr><td>队员</td><td><code class="inline">IAI_HOME=~/.iai-mem IAI_RELAY=… iai serve --port 8788</code></td><td>申请入队、申请角色；控制台 :8788</td></tr>
       </tbody>
     </table>
 
@@ -163,47 +163,52 @@ footer a{color:var(--muted)}
 
   <section id="join">
     <h2>3. 入队审批（领取前置）</h2>
-    <p class="lead">未批准成员领取网络任务会得到 <strong>403</strong>。先完成申请 → 批准。</p>
+    <p class="lead">仅<strong>队长</strong>可发起任务。队员先申请入队（可填加入词）；队长可批准或<strong>填写原因拒绝</strong>（拒绝后本次不可再申请）。队长还可查看在线空闲队员并邀请。</p>
     <ol class="steps">
+      <li><strong>设置角色</strong>（可选）
+<pre><span class="pmt">$</span> IAI_HOME=~/.iai-cap iai node role captain
+<span class="pmt">$</span> IAI_HOME=~/.iai-mem iai node role member</pre>
+      </li>
       <li><strong>查队长 node id</strong>
 <pre><span class="pmt">$</span> IAI_HOME=~/.iai-cap iai node status</pre>
-        记下类似 <code class="inline">node.xxxx</code> 的标识。
+        记下类似 <code class="inline">captain.xxxx</code> 的标识。
       </li>
-      <li><strong>队员申请</strong>：打开队员控制台 → 左侧「团队」→「申请 / 审批」→ 填入队长 node id →「提交申请」。</li>
-      <li><strong>队长批准</strong>：队长控制台同一面板 → 待审批列表 →「批准」。</li>
+      <li><strong>队员申请</strong>：队员控制台 →「团队」→「申请 / 审批 / 邀请」→ 填队长 id、角色与加入词 →「提交申请」。</li>
+      <li><strong>队长批准/拒绝</strong>：队长同一面板 → 待审批列表 →「批准」或「拒绝」（须填原因）。</li>
     </ol>
   </section>
 
   <section id="create">
     <h2>4. 队长创建任务</h2>
-    <p class="lead">创建「网络可领取」任务，才会出现在中继公告板供队员领取。</p>
+    <p class="lead">创建后任务进入<strong>招募中</strong>；网络可见任务会出现在中继公告板。招满后变为「招募完成可运行」，由队长启动执行。</p>
     <ol class="steps">
-      <li>队长控制台 →「任务」→「+ 新建任务」。</li>
-      <li>填写标题与说明；仓库选开源 GitHub 地址，先点<strong>连通检测</strong>。</li>
-      <li>至少配置 1 个非队长角色，招募数 ≥ 1。</li>
-      <li>可见性选择 <strong>「网络可领取」</strong>（不要选「仅本机」）。奖金可先填 0。</li>
-      <li>点击「创建任务」，记下返回的 task id。</li>
+      <li>队长控制台 →「+ 新建任务」（队员看不到新建入口）。</li>
+      <li>填写标题；仓库先点<strong>连通检测</strong>。</li>
+      <li>至少配置 1 个开发角色，招募数 ≥ 1。</li>
+      <li>可见性选 <strong>「网络可领取」</strong>（跨节点招募）或「仅本机」。奖金可先填 0。</li>
+      <li>创建成功后状态为 <code class="inline">recruiting</code>。</li>
     </ol>
   </section>
 
   <section id="claim">
-    <h2>5. 队员领取任务</h2>
-    <p class="lead">入队批准后，在队员控制台的网络任务列表领取开放槽。</p>
+    <h2>5. 队员申请角色 → 招满 → 队长启动</h2>
+    <p class="lead">队员选择未招满角色申请（可填加入词），队长审批通过后正式占槽；全部招满后队长点「开始下发任务」。</p>
     <ol class="steps">
-      <li>队员控制台打开网络任务 / 可领列表（与任务视图相关区域）。</li>
-      <li>找到队长刚发布的任务与开放槽 → 点 <strong>「领取」</strong>。</li>
-      <li>成功后按钮变为「已领取」。状态为 <code class="inline">claimed</code> 即完成本手册 Phase 1 验收。</li>
+      <li>队员控制台 → 市场页「网络任务公告板」→ 点角色旁 <strong>「申请加入」</strong>，可填加入词。</li>
+      <li>队长打开该任务详情 →「待审招募」→ 批准或拒绝（拒绝须填原因，本次不可再申请该角色）。</li>
+      <li>名额招满后状态变为 <strong>招募完成可运行</strong>；队长在任务详情点 <strong>「开始下发任务」</strong>。</li>
     </ol>
 
-    <div class="flow">队员申请入队 → 队长批准 → 队长新建「网络可领取」任务 → 队员点领取</div>
+    <div class="flow">队员申请入队 → 队长批准 → 队长新建任务（招募中）→ 队员申请角色 → 队长审批 → 招满可运行 → 队长启动</div>
 
     <table class="table">
       <thead><tr><th>结果</th><th>含义</th></tr></thead>
       <tbody>
-        <tr><td>已领取</td><td>槽位 claimed，成功</td></tr>
-        <tr><td>403</td><td>未加入该队长团队或尚未批准</td></tr>
-        <tr><td>409</td><td>槽已被他人领走</td></tr>
-        <tr><td>未配置中继</td><td>启动 serve 时未设置 IAI_RELAY</td></tr>
+        <tr><td>已申请 / pending</td><td>等待队长审批</td></tr>
+        <tr><td>招募完成可运行</td><td>槽位已满，可启动</td></tr>
+        <tr><td>拒绝后不可再申请</td><td>入队或该角色本次被拒</td></tr>
+        <tr><td>仅队长可发起/启动</td><td>队员调用会 403</td></tr>
+        <tr><td>未配置中继</td><td>跨节点时需 IAI_RELAY</td></tr>
       </tbody>
     </table>
   </section>

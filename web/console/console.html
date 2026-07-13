@@ -273,6 +273,7 @@
       <div class="cmd">⌘K 运行命令…<kbd>iai</kbd></div>
       <div class="wallet"><span class="coin">¥</span><b id="wbal" class="tnum">1,240</b><small>贡献币</small></div>
       <button class="btn btn-pri" data-view="tasks" id="newTask">+ 新建任务</button>
+      <button class="btn btn-ghost" id="btnSwitchRole" title="切换队长/队员" style="margin-left:6px;display:none">切为队员</button>
       <button class="btn btn-ghost" id="logoutBtn" title="注销并回到登录页" style="margin-left:6px">退出</button>
     </div>
 
@@ -312,8 +313,8 @@
 
       <!-- TASKS -->
       <section class="view" data-view="tasks">
-        <div class="view-head"><div><h1>任务</h1><p>按提示词分派给不同角色的成员节点，由各节点大模型协同完成。</p></div><div class="filter" id="taskFilter"><button class="on" data-f="all">全部</button><button data-f="run">运行中</button><button data-f="done">已采纳</button></div></div>
-        <div class="card" style="margin-bottom:16px">
+        <div class="view-head"><div><h1>任务</h1><p id="tasksSub">队长发起任务并招募；队员可申请未招满角色；招满后队长启动执行。</p></div><div class="filter" id="taskFilter"><button class="on" data-f="all">全部</button><button data-f="run">运行中</button><button data-f="done">已采纳</button></div></div>
+        <div class="card" style="margin-bottom:16px" id="taskCreateCard">
           <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
             <input id="taskPrompt" class="qty-in" style="flex:2;min-width:240px;width:auto" placeholder="描述需求，如：实现一个 Rust 限流中间件">
             <input id="taskRepo" class="qty-in mono" style="flex:1;min-width:200px;width:auto" placeholder="github.com/acme/public-repo" value="github.com/acme/public-repo">
@@ -361,17 +362,24 @@
 
       <!-- TEAM -->
       <section class="view" data-view="team">
-        <div class="view-head"><div><h1>团队成员节点</h1><p>队员申请入队，队长批准后方可领取网络任务。</p></div>
-          <button class="btn btn-ghost" id="btnTeamPanel" type="button">申请 / 审批</button>
+        <div class="view-head"><div><h1>团队成员节点</h1><p>队员申请入队（可填加入词），队长审批；拒绝后本次不可再申请。队长可邀请在线空闲队员。</p></div>
+          <button class="btn btn-ghost" id="btnTeamPanel" type="button">申请 / 审批 / 邀请</button>
         </div>
         <div class="card deep" id="teamJoinPanel" style="display:none;margin-bottom:14px">
-          <h3 style="margin:0 0 10px">申请加入团队</h3>
-          <div class="fld"><span>队长节点 ID</span><input id="joinCaptainId" placeholder="node.xxxx" autocomplete="off"></div>
-          <div class="fld"><span>角色</span><input id="joinRole" value="开发" autocomplete="off"></div>
-          <button class="btn" id="btnApplyJoin" type="button" style="margin-top:8px">提交申请</button>
-          <p class="stat-sub" id="joinApplyMsg" style="margin-top:8px"></p>
-          <h3 style="margin:18px 0 10px">待审批申请</h3>
-          <div id="joinReqList" class="empty" style="padding:4px 0">加载中…</div>
+          <div id="memberApplyBox">
+            <h3 style="margin:0 0 10px">申请加入团队</h3>
+            <div class="fld"><span>队长节点 ID</span><input id="joinCaptainId" placeholder="captain.xxxx" autocomplete="off"></div>
+            <div class="fld"><span>角色</span><input id="joinRole" value="开发" autocomplete="off"></div>
+            <div class="fld"><span>加入词</span><input id="joinMessage" placeholder="简单介绍自己或想加入的原因" autocomplete="off"></div>
+            <button class="btn" id="btnApplyJoin" type="button" style="margin-top:8px">提交申请</button>
+            <p class="stat-sub" id="joinApplyMsg" style="margin-top:8px"></p>
+          </div>
+          <div id="captainApproveBox" style="display:none">
+            <h3 style="margin:18px 0 10px">待审批入队申请</h3>
+            <div id="joinReqList" class="empty" style="padding:4px 0">加载中…</div>
+            <h3 style="margin:18px 0 10px">在线空闲队员 · 邀请</h3>
+            <div id="idleMemberList" class="empty" style="padding:4px 0">加载中…</div>
+          </div>
         </div>
         <div class="card deep">
           <table class="members"><thead><tr><th>节点</th><th>角色</th><th>模型</th><th>状态</th><th>累计贡献</th></tr></thead><tbody id="teamBody"></tbody></table>
