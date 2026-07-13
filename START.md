@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | ba
 
 ```sh
 # 指定版本
-curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash -s -- --version v0.4.2
+curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash -s -- --version v0.4.3
 
 # 安装到自定义目录
 curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash -s -- --dir ~/.local/bin
@@ -35,9 +35,19 @@ curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | ba
 
 ```sh
 iai version
-# 期望类似：iai-chain 0.4.2
+# 期望类似：iai-chain 0.4.3
 ```
 
+### 升级（已安装过）
+
+```sh
+iai upgrade check              # 仅检查
+iai upgrade run -y             # 升到最新 Release
+iai upgrade run --to v0.4.3 -y # 指定版本
+iai --version
+```
+
+也可再次执行上方 `install.sh`（等价重装）。
 > 若下载失败，说明该平台的 Release 资产尚未上传。可改用下方源码构建，或请维护者执行：
 > `scripts/publish.sh --upload`（产物名：`iai-v<VER>-<TARGET>.tar.gz`）。
 
@@ -190,7 +200,7 @@ scripts/publish.sh --upload
 
 # 或只打本机包再手动上传
 scripts/publish.sh --targets host
-gh release create v0.4.2 ./dist/* --title "v0.4.2"
+gh release create v0.4.3 ./dist/* --title "v0.4.3"
 ```
 
 上传成功后，用户即可用文首的 `curl … | bash` 安装。

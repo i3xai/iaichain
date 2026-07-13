@@ -28,7 +28,7 @@ machine-summary:
 ```sh
 # 1) 安装 iai（优先：GitHub Release 预编译包，无需 Rust）
 curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash
-iai version                # 成功判据：输出 "iai-chain 0.4.2"（版本号随 Release 变化）
+iai version                # 成功判据：输出 "iai-chain 0.4.3"（版本号随 Release 变化）
 
 # 若 install.sh / Release 不可用，再源码构建（需 Rust 1.83+）：
 #   cargo --version && git clone https://github.com/i3xai/iaichain.git && cd iaichain
@@ -74,7 +74,7 @@ curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | ba
 
 ```sh
 # 指定版本（tag）
-curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash -s -- --version v0.4.2
+curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash -s -- --version v0.4.3
 
 # 安装到自定义目录
 curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | bash -s -- --dir ~/.local/bin
@@ -90,8 +90,23 @@ curl -fsSL https://raw.githubusercontent.com/i3xai/iaichain/main/install.sh | ba
 
 ```sh
 iai version
-# 期望类似：iai-chain 0.4.2
+# 期望类似：iai-chain 0.4.3
 ```
+
+### 2.2 在线升级（已安装）
+
+从 GitHub Releases 拉取最新（或指定）版本并替换当前二进制：
+
+```sh
+iai upgrade check                 # 仅检查，不安装
+iai upgrade run                   # 升到 latest（会确认）
+iai upgrade run -y                # 跳过确认
+iai upgrade run --to v0.4.3 -y    # 指定 tag
+iai upgrade run -y --no-restart   # 不自动 restart systemd
+iai --version
+```
+
+> 依赖对应平台资产已上传到 Release。也可再次执行 `install.sh` 等价重装。
 
 > 若报 404：确认 `main` 上已有 [install.sh](https://github.com/i3xai/iaichain/blob/main/install.sh)，且对应 Release 含本机平台资产。  
 > 维护者上传包：`scripts/publish.sh --upload`。
@@ -101,7 +116,7 @@ iai version
 ```sh
 git clone https://github.com/i3xai/iaichain.git
 cd iaichain
-bash install.sh --version v0.4.2
+bash install.sh --version v0.4.3
 ```
 
 ### 2.2 源码构建（开发 / 无预编译包时）

@@ -96,11 +96,12 @@ footer a{color:var(--muted)}
     <p>从安装到「中继 + 队长 + 队员」跑通：创建任务、申请入队、申请角色、招满后启动。对应产品 Phase 1 闭环。</p>
     <div class="toc">
       <a href="#install">1. 安装</a>
-      <a href="#start">2. 三进程启动</a>
-      <a href="#join">3. 入队审批</a>
-      <a href="#create">4. 创建任务</a>
-      <a href="#claim">5. 领取任务</a>
-      <a href="#faq">6. 常见问题</a>
+      <a href="#upgrade">2. 升级</a>
+      <a href="#start">3. 三进程启动</a>
+      <a href="#join">4. 入队审批</a>
+      <a href="#create">5. 创建任务</a>
+      <a href="#claim">6. 申请角色与启动</a>
+      <a href="#faq">7. 常见问题</a>
     </div>
     <p style="margin-top:20px"><a class="btn-home" href="/" style="margin-left:0">← 返回首页 iaiaiai.ai</a></p>
   </div>
@@ -113,21 +114,40 @@ footer a{color:var(--muted)}
 <pre><button class="copy-btn" type="button" data-copy="curl -fsSL https://iaiaiai.ai/install.sh | bash">复制</button><span class="pmt">$</span> curl -fsSL https://iaiaiai.ai/install.sh | bash</pre>
 
     <h3>指定版本 / 目录</h3>
-<pre><button class="copy-btn" type="button" data-copy="curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --version v0.4.2">复制</button><span class="cmt"># 指定版本</span>
-<span class="pmt">$</span> curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --version v0.4.2
+<pre><button class="copy-btn" type="button" data-copy="curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --version v0.4.3">复制</button><span class="cmt"># 指定版本</span>
+<span class="pmt">$</span> curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --version v0.4.3
 
 <span class="cmt"># 安装到自定义目录</span>
 <span class="pmt">$</span> curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --dir ~/.local/bin</pre>
 
     <h3>验证</h3>
 <pre><span class="pmt">$</span> iai version
-<span class="cmt"># 期望类似：iai-chain 0.4.2</span></pre>
+<span class="cmt"># 期望类似：iai-chain 0.4.3</span></pre>
 
     <div class="callout">当前 Release 若只有 <strong>macos-aarch64</strong> 资产，其他平台请用源码构建：<code class="inline">cargo build --release</code>。完整说明见仓库 <a href="https://github.com/i3xai/iaichain/blob/main/START.md">START.md</a> / <a href="https://github.com/i3xai/iaichain/blob/main/USAGE.md">USAGE.md</a>。</div>
   </section>
 
+  <section id="upgrade">
+    <h2>2. 升级到最新包</h2>
+    <p class="lead">已安装 <code class="inline">iai</code> 后，用内置命令从 GitHub Releases 拉取并替换当前二进制（无需再跑 install.sh）。</p>
+
+    <h3>检查是否有新版本</h3>
+<pre><button class="copy-btn" type="button" data-copy="iai upgrade check">复制</button><span class="pmt">$</span> iai upgrade check</pre>
+
+    <h3>升级到最新 Release</h3>
+<pre><button class="copy-btn" type="button" data-copy="iai upgrade run -y">复制</button><span class="pmt">$</span> iai upgrade run
+<span class="cmt"># 跳过确认：</span>
+<span class="pmt">$</span> iai upgrade run -y</pre>
+
+    <h3>升级到指定版本</h3>
+<pre><button class="copy-btn" type="button" data-copy="iai upgrade run --to v0.4.3 -y">复制</button><span class="pmt">$</span> iai upgrade run --to v0.4.3 -y</pre>
+
+    <p class="lead" style="margin-top:12px">装完后执行 <code class="inline">iai --version</code> 确认。若本机用 systemd 跑 <code class="inline">iai.service</code>，默认会自动 restart；不想重启可加 <code class="inline">--no-restart</code>。</p>
+    <div class="callout">等价重装：<code class="inline">curl -fsSL https://iaiaiai.ai/install.sh | bash</code>。升级依赖 GitHub Release 已发布对应平台资产。</div>
+  </section>
+
   <section id="start">
-    <h2>2. 启动：中继 + 队长 + 队员</h2>
+    <h2>3. 启动：中继 + 队长 + 队员</h2>
     <p class="lead">本机开 3 个终端，模拟网络协调与两个独立节点。数据目录必须分开。</p>
 
     <table class="table">
@@ -162,7 +182,7 @@ footer a{color:var(--muted)}
   </section>
 
   <section id="join">
-    <h2>3. 入队审批（领取前置）</h2>
+    <h2>4. 入队审批（领取前置）</h2>
     <p class="lead">仅<strong>队长</strong>可发起任务。队员先申请入队（可填加入词）；队长可批准或<strong>填写原因拒绝</strong>（拒绝后本次不可再申请）。队长还可查看在线空闲队员并邀请。</p>
     <ol class="steps">
       <li><strong>设置角色</strong>（可选）
@@ -179,7 +199,7 @@ footer a{color:var(--muted)}
   </section>
 
   <section id="create">
-    <h2>4. 队长创建任务</h2>
+    <h2>5. 队长创建任务</h2>
     <p class="lead">创建后任务进入<strong>招募中</strong>；网络可见任务会出现在中继公告板。招满后变为「招募完成可运行」，由队长启动执行。</p>
     <ol class="steps">
       <li>队长控制台 →「+ 新建任务」（队员看不到新建入口）。</li>
@@ -191,7 +211,7 @@ footer a{color:var(--muted)}
   </section>
 
   <section id="claim">
-    <h2>5. 队员申请角色 → 招满 → 队长启动</h2>
+    <h2>6. 队员申请角色 → 招满 → 队长启动</h2>
     <p class="lead">队员选择未招满角色申请（可填加入词），队长审批通过后正式占槽；全部招满后队长点「开始下发任务」。</p>
     <ol class="steps">
       <li>队员控制台 → 市场页「网络任务公告板」→ 点角色旁 <strong>「申请加入」</strong>，可填加入词。</li>
@@ -214,7 +234,7 @@ footer a{color:var(--muted)}
   </section>
 
   <section id="faq">
-    <h2>6. 常见问题</h2>
+    <h2>7. 常见问题</h2>
     <h3>command not found: iai</h3>
     <p class="lead">检查 PATH，或重新执行安装脚本；源码构建可用 <code class="inline">./target/release/iai</code>。</p>
 
