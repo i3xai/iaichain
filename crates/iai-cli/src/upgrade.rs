@@ -242,18 +242,17 @@ pub async fn run(target_version: Option<String>, yes: bool, no_restart: bool) ->
         println!("⚠ release 未提供 .sha256 文件，仅依赖 TLS 完整性");
     }
 
-    // 7. 解压
+    // 7. 解压（包布局为 `iai-vX-TARGET/iai`，兼容顶层直接放 `iai`）
     let extract_dir = tmpdir.join("extracted");
     std::fs::create_dir_all(&extract_dir)?;
     extract_tar_gz(&tar_path, &extract_dir).context("解压 tar.gz 失败")?;
-    let new_bin = extract_dir.join("iai");
-    if !new_bin.exists() {
-        bail!("解压后未在顶层目录找到 `iai` 二进制");
-    }
+    let new_bin = find_iai_binary(&extract_dir)
+        .ok_or_else(|| anyhow!("解压后未找到 `iai` 二进制（已检查顶层与一级子目录）"))?;
     let meta = std::fs::metadata(&new_bin)?;
     if meta.len() < 100_000 {
         bail!("解压出的 `iai` 大小异常（{} bytes），疑似损坏", meta.len());
     }
+    println!("✓ 解压得到 {}", new_bin.display());
 
     // 8. 备份 + 替换
     let self_path = std::env::current_exe().context("获取当前二进制路径失败")?;
@@ -367,6 +366,42 @@ fn extract_tar_gz(archive: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 在解压目录中定位 `iai`：优先顶层，其次一级子目录（与 publish.sh 顶层目录布局对齐）。
+fn find_iai_binary(extract_dir: &Path) -> Option<PathBuf> {
+    let top = extract_dir.join("iai");
+    if top.is_file() {
+        return Some(top);
+    }
+    let Ok(entries) = std::fs::read_dir(extract_dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let candidate = path.join("iai");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    // 兜底：浅层递归找名为 iai 的文件（最多两层）
+    for entry in std::fs::read_dir(extract_dir).ok()?.flatten() {
+        let p = entry.path();
+        if p.is_file() && p.file_name().and_then(|n| n.to_str()) == Some("iai") {
+            return Some(p);
+        }
+        if p.is_dir() {
+            for sub in std::fs::read_dir(&p).ok()?.flatten() {
+                let sp = sub.path();
+                if sp.is_file() && sp.file_name().and_then(|n| n.to_str()) == Some("iai") {
+                    return Some(sp);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn try_systemctl_restart(unit: &str) -> bool {
     let cat = Command::new("systemctl").args(["cat", unit]).output();
     let Ok(cat) = cat else {
@@ -388,4 +423,38 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     s.push(".");
     s.push(suffix);
     PathBuf::from(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("iai-upgrade-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn find_iai_in_nested_release_layout() {
+        let dir = scratch_dir("nested");
+        let nested = dir.join("iai-v0.4.3-macos-aarch64");
+        std::fs::create_dir_all(&nested).unwrap();
+        let bin = nested.join("iai");
+        std::fs::write(&bin, vec![0u8; 120_000]).unwrap();
+        let found = find_iai_binary(&dir).unwrap();
+        assert_eq!(found, bin);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_iai_at_archive_root() {
+        let dir = scratch_dir("root");
+        let bin = dir.join("iai");
+        std::fs::write(&bin, vec![0u8; 120_000]).unwrap();
+        let found = find_iai_binary(&dir).unwrap();
+        assert_eq!(found, bin);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

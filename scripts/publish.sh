@@ -196,14 +196,12 @@ pack_one() {
     return 1
   fi
 
-  # tar 包内容：单个 iai 二进制 + 顶层目录
-  local tar_top="iai-v${ver}-${target}"
-  mkdir -p "$tmp_dir/$tar_top"
-  cp "$bin" "$tmp_dir/$tar_top/iai"
-  chmod 755 "$tmp_dir/$tar_top/iai"
+  # tar 包内容：顶层直接放 `iai`（与 iai upgrade 解压预期对齐；install.sh 也兼容）
+  cp "$bin" "$tmp_dir/iai"
+  chmod 755 "$tmp_dir/iai"
 
   local dist_abs="$ROOT/dist"
-  (cd "$tmp_dir" && tar czf "$dist_abs/$tar_name" "$tar_top")
+  (cd "$tmp_dir" && tar czf "$dist_abs/$tar_name" iai)
   (cd "$dist_abs" && sha256sum "$tar_name" > "$tar_name.sha256")
 
   rm -rf "$tmp_dir"

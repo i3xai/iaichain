@@ -114,15 +114,15 @@ footer a{color:var(--muted)}
 <pre><button class="copy-btn" type="button" data-copy="curl -fsSL https://iaiaiai.ai/install.sh | bash">复制</button><span class="pmt">$</span> curl -fsSL https://iaiaiai.ai/install.sh | bash</pre>
 
     <h3>指定版本 / 目录</h3>
-<pre><button class="copy-btn" type="button" data-copy="curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --version v0.4.3">复制</button><span class="cmt"># 指定版本</span>
-<span class="pmt">$</span> curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --version v0.4.3
+<pre><button class="copy-btn" type="button" data-copy="curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --version v0.4.4">复制</button><span class="cmt"># 指定版本</span>
+<span class="pmt">$</span> curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --version v0.4.4
 
 <span class="cmt"># 安装到自定义目录</span>
 <span class="pmt">$</span> curl -fsSL https://iaiaiai.ai/install.sh | bash -s -- --dir ~/.local/bin</pre>
 
     <h3>验证</h3>
 <pre><span class="pmt">$</span> iai version
-<span class="cmt"># 期望类似：iai-chain 0.4.3</span></pre>
+<span class="cmt"># 期望类似：iai-chain 0.4.4</span></pre>
 
     <div class="callout">当前 Release 若只有 <strong>macos-aarch64</strong> 资产，其他平台请用源码构建：<code class="inline">cargo build --release</code>。完整说明见仓库 <a href="https://github.com/i3xai/iaichain/blob/main/START.md">START.md</a> / <a href="https://github.com/i3xai/iaichain/blob/main/USAGE.md">USAGE.md</a>。</div>
   </section>
@@ -140,7 +140,7 @@ footer a{color:var(--muted)}
 <span class="pmt">$</span> iai upgrade run -y</pre>
 
     <h3>升级到指定版本</h3>
-<pre><button class="copy-btn" type="button" data-copy="iai upgrade run --to v0.4.3 -y">复制</button><span class="pmt">$</span> iai upgrade run --to v0.4.3 -y</pre>
+<pre><button class="copy-btn" type="button" data-copy="iai upgrade run --to v0.4.4 -y">复制</button><span class="pmt">$</span> iai upgrade run --to v0.4.4 -y</pre>
 
     <p class="lead" style="margin-top:12px">装完后执行 <code class="inline">iai --version</code> 确认。若本机用 systemd 跑 <code class="inline">iai.service</code>，默认会自动 restart；不想重启可加 <code class="inline">--no-restart</code>。</p>
     <div class="callout">等价重装：<code class="inline">curl -fsSL https://iaiaiai.ai/install.sh | bash</code>。升级依赖 GitHub Release 已发布对应平台资产。</div>
